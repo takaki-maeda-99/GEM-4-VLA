@@ -111,10 +111,15 @@ class XVLAAdapterPolicy(BasePolicy):
         return self.image_transform(t)
 
     def _build_batch(self, obs: Dict[str, Any]) -> Dict[str, torch.Tensor]:
-        device = next(self.model.parameters()).device
-        scene = self._np_image_to_chw(obs["scene_image"]).unsqueeze(0).to(device)
-        wrist = self._np_image_to_chw(obs["wrist_image"]).unsqueeze(0).to(device)
-        proprio = torch.from_numpy(np.asarray(obs["proprio"], dtype=np.float32)).unsqueeze(0).to(device)
+        # Match Trainer's per-batch dtype/device handling: float tensors get
+        # cast to the model's parameter dtype (e.g. bf16); long/bool tensors
+        # keep their integer dtypes.
+        first_param = next(self.model.parameters())
+        device = first_param.device
+        model_dtype = first_param.dtype
+        scene = self._np_image_to_chw(obs["scene_image"]).unsqueeze(0).to(device).to(model_dtype)
+        wrist = self._np_image_to_chw(obs["wrist_image"]).unsqueeze(0).to(device).to(model_dtype)
+        proprio = torch.from_numpy(np.asarray(obs["proprio"], dtype=np.float32)).unsqueeze(0).to(device).to(model_dtype)
         prompt = self.tokenizer(obs["language"])
         return {
             "domain_id": torch.tensor([self.domain_id], dtype=torch.long, device=device),
@@ -123,8 +128,8 @@ class XVLAAdapterPolicy(BasePolicy):
             "prompt_input_ids": prompt["input_ids"].unsqueeze(0).to(device),
             "prompt_attention_mask": prompt["attention_mask"].unsqueeze(0).to(device),
             "proprio": proprio,
-            "last_action_chunk": self._last_chunk_norm.unsqueeze(0).to(device),
-            "target_action": torch.zeros(1, self.action_chunk_len, C.ACTION_DIM, device=device),
+            "last_action_chunk": self._last_chunk_norm.unsqueeze(0).to(device).to(model_dtype),
+            "target_action": torch.zeros(1, self.action_chunk_len, C.ACTION_DIM, device=device, dtype=model_dtype),
             "action_mask": torch.ones(1, self.action_chunk_len, dtype=torch.bool, device=device),
         }
 
