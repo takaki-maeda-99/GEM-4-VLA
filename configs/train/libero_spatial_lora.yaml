@@ -7,8 +7,8 @@ model:
   num_blocks: 35
   use_grad_checkpoint: true
   lora:
-    r: 8
-    alpha: 16
+    r: 64
+    alpha: 128       # alpha/r = 2 (LoRA paper convention)
     target_modules: [q_proj, v_proj]
     dropout: 0.0
 vision:
@@ -31,9 +31,9 @@ train:
   weight_decay: 0.01
   max_steps: 10000
   save_every: 5000
-  save_dir: outputs/libero_spatial_lora_2026-05-01/checkpoints
+  save_dir: outputs/libero_spatial_lora_r64_2026-05-01/checkpoints
 wandb:
   enabled: true
   project: vla-project
-  name: libero_spatial_lora_bs8_10k_2026-05-01
-  tags: [libero_spatial, bs8, stage2_lora, real_prior_chunk]
+  name: libero_spatial_lora_r64_bs8_10k_2026-05-01
+  tags: [libero_spatial, bs8, stage2_lora, lora_r64, real_prior_chunk]
