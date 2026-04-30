@@ -77,6 +77,8 @@ def main(cfg_path: str) -> None:
         num_episodes_per_task=int(cfg.eval.num_episodes_per_task),
         max_steps=int(cfg.eval.max_steps),
         num_steps_wait=int(cfg.eval.num_steps_wait),
+        video_dir=cfg.eval.get("video_dir", None),
+        video_fps=int(cfg.eval.get("video_fps", 10)),
     )
     summary = {"overall": metrics["overall"], "per_task": metrics["per_task"]}
     print(f"[eval] metrics={json.dumps(summary, indent=2)}")

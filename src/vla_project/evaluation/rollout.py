@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
 
@@ -28,6 +28,7 @@ class EpisodeResult:
     num_env_steps: int
     num_policy_calls: int
     elapsed_s: float
+    frames: List[np.ndarray] = field(default_factory=list)
     info: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -43,20 +44,36 @@ def run_episode(
     num_steps_wait: int = 10,
     action_dim: int = 7,
     success_check: Optional[Callable[[BaseRobot, Dict[str, Any]], bool]] = None,
+    capture_frames: bool = False,
 ) -> EpisodeResult:
-    """Run one closed-loop episode."""
+    """Run one closed-loop episode.
+
+    When ``capture_frames=True``, ``EpisodeResult.frames`` is populated with
+    one ``obs["scene_image"]`` snapshot per env step (including warm-up).
+    """
     t0 = time.perf_counter()
     check = success_check or (lambda r, _o: r.check_success())
     success = False
     num_policy_calls = 0
     num_env_steps = 0
+    frames: List[np.ndarray] = []
 
     obs = robot.reset()
     policy.reset()
 
+    def _maybe_capture(o: Dict[str, Any]) -> None:
+        if not capture_frames:
+            return
+        img = o.get("scene_image")
+        if img is not None:
+            frames.append(np.asarray(img).copy())
+
+    _maybe_capture(obs)
+
     for _ in range(num_steps_wait):
         obs = robot.send_action(_zero_action(action_dim))
         num_env_steps += 1
+        _maybe_capture(obs)
         if check(robot, obs):
             success = True
             break
@@ -67,6 +84,7 @@ def run_episode(
             num_policy_calls += 1
             obs = robot.send_action(action)
             num_env_steps += 1
+            _maybe_capture(obs)
             if check(robot, obs):
                 success = True
                 break
@@ -76,5 +94,6 @@ def run_episode(
         num_env_steps=num_env_steps,
         num_policy_calls=num_policy_calls,
         elapsed_s=time.perf_counter() - t0,
+        frames=frames,
         info={},
     )
