@@ -185,27 +185,22 @@ class _StubAccLog:
 
 def test_warmup_ramps_lr_from_zero_to_init() -> None:
     """warmup_steps=10: at step 0 → lr=0; at step 10 → lr=init; min_lr_ratio=0
-    forces post-warmup to enter cosine decay reaching 0 at total_steps."""
+    forces post-warmup to enter cosine decay reaching 0 at total_steps.
+    Uses 'soft_prompts' group name to match the default schedule_group_names."""
     model = _Toy()
     init_lr = 1e-3
     opt = torch.optim.SGD(model.parameters(), lr=init_lr)
-    # tag the group with a name so the per-group log key works
-    opt.param_groups[0]["name"] = "toy"
+    opt.param_groups[0]["name"] = "soft_prompts"
     dl = DataLoader(_ToyDS(), batch_size=2, collate_fn=_collate)
     cfg = TrainerConfig(max_steps=20, warmup_steps=10, min_lr_ratio=0.0)
     acc = _StubAccLog()
     trainer = Trainer(model, opt, cfg, accelerator=acc)
     trainer.fit(dl)
 
-    lrs = [p[0]["train/lr/toy"] for p in acc.log_calls]
-    # Step 0 used lr=0 (logged at step=1 entry); step 9 used lr=9/10*init.
-    # The logged lrs are AFTER the schedule applied for the just-completed step.
+    lrs = [p[0]["train/lr/soft_prompts"] for p in acc.log_calls]
     assert lrs[0] == 0.0
     assert abs(lrs[9] - 0.9 * init_lr) < 1e-9
-    # Step 10 (just past warmup): lr = init * (min + (1-min)*cos(0)) = init.
     assert abs(lrs[10] - init_lr) < 1e-9
-    # Final step's lr decayed well below peak (cosine end with min_lr_ratio=0
-    # at step=N-1 / N=0.9 progress -> ~0.024 × init_lr).
     assert lrs[-1] < 0.05 * init_lr
 
 
@@ -226,17 +221,15 @@ def test_no_scheduling_when_warmup_zero_and_min_lr_ratio_one() -> None:
 
 
 def test_freeze_steps_applies_only_to_named_groups() -> None:
-    """freeze_steps applies only to groups listed in freeze_group_names.
-    Head / projection / soft_prompt groups warm up from step 0; gemma_lora
-    stays at lr=0 during the freeze window."""
+    """X-VLA stage curriculum: action_head NOT in schedule_group_names → constant
+    LR. gemma_lora IS in both schedule_group_names and freeze_group_names →
+    freeze + warmup + (cosine if min_lr_ratio<1)."""
     model = _Toy()
     head_lr = 1e-3
     backbone_lr = 1e-4
     opt = torch.optim.SGD([
         {"name": "action_head", "params": list(model.parameters()), "lr": head_lr},
     ])
-    # Add a fake "gemma_lora" group with a separate trivial param so we can
-    # observe its lr trajectory without affecting actual training.
     fake_param = nn.Parameter(torch.zeros(2))
     opt.add_param_group({"name": "gemma_lora", "params": [fake_param], "lr": backbone_lr})
     dl = DataLoader(_ToyDS(), batch_size=2, collate_fn=_collate)
@@ -249,13 +242,41 @@ def test_freeze_steps_applies_only_to_named_groups() -> None:
 
     head_lrs = [p[0]["train/lr/action_head"] for p in acc.log_calls]
     bb_lrs   = [p[0]["train/lr/gemma_lora"]  for p in acc.log_calls]
-    # Action head: warmup from step 0, peak at step 5.
-    assert head_lrs[0] == 0.0
-    assert abs(head_lrs[4] - 0.8 * head_lr) < 1e-9   # 4/5 ramp
-    assert abs(head_lrs[5] - head_lr) < 1e-9         # peak
-    # Backbone: frozen until step 5, then ramps over warmup_steps=5 -> peak at step 10.
+    # action_head NOT scheduled → constant at head_lr throughout.
+    assert all(abs(lr - head_lr) < 1e-9 for lr in head_lrs)
+    # gemma_lora: frozen 0..4, warmup 5..9, peak at 10.
     for lr in bb_lrs[:5]:
         assert lr == 0.0
-    assert abs(bb_lrs[5] - 0.0) < 1e-9               # first warmup step (s=0/5)
-    assert abs(bb_lrs[9] - 0.8 * backbone_lr) < 1e-9 # last warmup step (s=4/5)
-    assert abs(bb_lrs[10] - backbone_lr) < 1e-9      # peak
+    assert abs(bb_lrs[5] - 0.0) < 1e-9
+    assert abs(bb_lrs[9] - 0.8 * backbone_lr) < 1e-9
+    assert abs(bb_lrs[10] - backbone_lr) < 1e-9
+
+
+def test_groups_outside_schedule_stay_constant() -> None:
+    """projections / action_queries / action_head all stay at their initial lr
+    (no warmup, no decay) when not in schedule_group_names."""
+    model = _Toy()
+    head_lr = 1e-3
+    soft_lr = 1e-4
+    opt = torch.optim.SGD([
+        {"name": "action_head", "params": list(model.parameters()), "lr": head_lr},
+    ])
+    fake_soft = nn.Parameter(torch.zeros(2))
+    opt.add_param_group({"name": "soft_prompts", "params": [fake_soft], "lr": soft_lr})
+    dl = DataLoader(_ToyDS(), batch_size=2, collate_fn=_collate)
+    cfg = TrainerConfig(max_steps=10, warmup_steps=4, min_lr_ratio=1.0)
+    acc = _StubAccLog()
+    trainer = Trainer(model, opt, cfg, accelerator=acc)
+    trainer.fit(dl)
+
+    head_lrs = [p[0]["train/lr/action_head"] for p in acc.log_calls]
+    soft_lrs = [p[0]["train/lr/soft_prompts"] for p in acc.log_calls]
+    # action_head NOT scheduled → constant.
+    assert all(abs(lr - head_lr) < 1e-9 for lr in head_lrs)
+    # soft_prompts IS scheduled → warmup ramp then flat at peak (min_lr_ratio=1).
+    assert soft_lrs[0] == 0.0
+    assert abs(soft_lrs[3] - 0.75 * soft_lr) < 1e-9
+    assert abs(soft_lrs[4] - soft_lr) < 1e-9
+    # min_lr_ratio=1.0 → constant peak after warmup, no decay.
+    for lr in soft_lrs[5:]:
+        assert abs(lr - soft_lr) < 1e-9

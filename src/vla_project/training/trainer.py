@@ -28,13 +28,16 @@ class TrainerConfig:
     # min_lr_ratio=1.0 → constant LR per group).
     warmup_steps: int = 0
     min_lr_ratio: float = 1.0
-    # `freeze_steps` applies ONLY to backbone groups in `freeze_group_names`.
-    # Other groups (head, projections, soft prompts, action queries) run
-    # warmup + decay from step 0 regardless. X-VLA convention: freeze the
-    # Gemma LoRA / SigLIP adapters early so the head learns to consume a
-    # stable representation, then ramp them in.
+    # X-VLA-style stage curriculum:
+    #   - groups in `schedule_group_names`: get freeze (if also in
+    #     freeze_group_names) → warmup → cosine decay (set min_lr_ratio=1.0
+    #     to drop decay and keep flat-after-warmup).
+    #   - all other groups: constant lr at their initial coef × base.
+    # Defaults: backbone + soft prompts go through schedule; head /
+    # projections / action queries stay at full lr the whole time.
     freeze_steps: int = 0
     freeze_group_names: Tuple[str, ...] = ("gemma_lora", "siglip")
+    schedule_group_names: Tuple[str, ...] = ("gemma_lora", "siglip", "soft_prompts")
     # Keys whose float tensors stay in their original dtype (do NOT cast to
     # model_dtype). Default protects regression labels: bf16 target makes
     # L1/MSE loss subtly lossy. Add ``loss_weight``, ``return_to_go``, etc.
@@ -180,13 +183,16 @@ class Trainer:
 
                 # Apply LR schedule for the upcoming optimizer step. `step` is
                 # 0-indexed here (incremented after optimizer.step below).
-                # Per-group freeze: backbone groups (gemma_lora, siglip) honor
-                # cfg.freeze_steps; everything else freezes 0 steps (warmup
-                # from step 0).
+                # Per-group: groups in schedule_group_names get freeze +
+                # warmup + (cosine decay if min_lr_ratio<1). Groups outside
+                # the list keep their initial constant lr.
                 if scheduler_active:
                     for g, init, name in zip(
                         self.optimizer.param_groups, initial_lrs, group_names
                     ):
+                        if name not in self.cfg.schedule_group_names:
+                            g["lr"] = init  # constant
+                            continue
                         eff_freeze = (
                             self.cfg.freeze_steps
                             if name in self.cfg.freeze_group_names
