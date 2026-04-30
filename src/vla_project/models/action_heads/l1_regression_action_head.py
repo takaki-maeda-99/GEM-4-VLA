@@ -20,6 +20,7 @@ class L1RegressionActionHead(nn.Module):
         num_action_chunks: int,
         num_blocks: int,
         num_task_tokens: int,
+        use_grad_checkpoint: bool = False,
     ) -> None:
         super().__init__()
         self.hidden_dim = hidden_dim
@@ -36,6 +37,7 @@ class L1RegressionActionHead(nn.Module):
             hidden_dim=hidden_dim,
             output_dim=hidden_dim,
             action_dim=action_dim,
+            use_grad_checkpoint=use_grad_checkpoint,
         )
 
     def forward(

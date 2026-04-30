@@ -30,6 +30,7 @@ class VLAPolicyConfig:
     eos_id: int = 1
     loss_type: str = "l1"  # or "huber"
     huber_beta: float = 0.1
+    use_grad_checkpoint: bool = False
 
 
 class VLAPolicy(nn.Module):
@@ -61,6 +62,7 @@ class VLAPolicy(nn.Module):
             num_action_chunks=cfg.action_chunk_len,
             num_blocks=cfg.num_blocks,
             num_task_tokens=C.NUM_SCENE_TOKENS + cfg.prompt_max_len + C.NUM_WRIST_TOKENS,
+            use_grad_checkpoint=cfg.use_grad_checkpoint,
         )
 
     def _build_x(self, last_action: torch.Tensor, domain_id: torch.Tensor) -> torch.Tensor:
@@ -97,37 +99,42 @@ class VLAPolicy(nn.Module):
         # 4. Build input_ids + indices
         packed = self.input_packer(batch["prompt_input_ids"], batch["prompt_attention_mask"])
 
-        # 5. Gemma forward with overwrite
+        # 5. Gemma forward with overwrite. Project module outputs to the LLM's
+        # dtype (defensively — when the whole policy is cast to bf16 these are
+        # already bf16 and the .to() is a no-op).
         raw_e = self.gemma.embed_tokens(packed.input_ids)
-        emb = scatter_into_embeds(raw_e, packed.idx["soft"], soft_e)
-        emb = scatter_into_embeds(emb, packed.idx["scene"], scene_e)
-        emb = scatter_into_embeds(emb, packed.idx["wrist"], wrist_e)
-        emb = scatter_into_embeds(emb, packed.idx["action"], action_q_e)
+        llm_dtype = raw_e.dtype
+        emb = scatter_into_embeds(raw_e, packed.idx["soft"], soft_e.to(llm_dtype))
+        emb = scatter_into_embeds(emb, packed.idx["scene"], scene_e.to(llm_dtype))
+        emb = scatter_into_embeds(emb, packed.idx["wrist"], wrist_e.to(llm_dtype))
+        emb = scatter_into_embeds(emb, packed.idx["action"], action_q_e.to(llm_dtype))
 
         out = self.gemma(
             input_ids=packed.input_ids,
             attention_mask=packed.attention_mask,
             inputs_embeds=emb,
         )
-        hs = out.hidden_states  # [B, layers+1, L, D]
+        hs = out.hidden_states  # [B, layers+1, L, D] in llm_dtype
 
-        # 6. Slice h_t (vision+text+wrist) and h_a (action)
+        # 6. Slice h_t / h_a — keep in llm_dtype (head's Linear weights match
+        # when the policy is cast to bf16; for stub-based fp32 tests, hs is fp32
+        # so this is also fine).
         task_idx = torch.cat([packed.idx["scene"], packed.idx["prompt"], packed.idx["wrist"]], dim=1)
         bs = torch.arange(B, device=hs.device).view(B, 1, 1)
         layers = torch.arange(hs.shape[1], device=hs.device).view(1, hs.shape[1], 1)
-        h_t = hs[bs, layers, task_idx.unsqueeze(1)]   # [B, layers+1, K_t, D]
-        h_a = hs[bs, layers, packed.idx["action"].unsqueeze(1)]  # [B, layers+1, Q, D]
+        h_t = hs[bs, layers, task_idx.unsqueeze(1)]                  # [B, layers+1, K_t, D]
+        h_a = hs[bs, layers, packed.idx["action"].unsqueeze(1)]      # [B, layers+1, Q, D]
 
-        # 7. x init from LastActionProj
+        # 7. x init from LastActionProj (matches policy dtype).
         x_init = self._build_x(batch["last_action_chunk"], domain_id)
 
-        # 8. proprio -> p
+        # 8. proprio -> p (matches policy dtype).
         p = self.proprio_proj(batch["proprio"], domain_id).unsqueeze(1)
 
-        # 9. action head
-        head_out = self.action_head(x_init, h_a=h_a, h_t=h_t, p=p)  # [B, T, D]
+        # 9. action head (policy dtype throughout).
+        head_out = self.action_head(x_init, h_a=h_a, h_t=h_t, p=p)   # [B, T, D]
 
-        # 10. action decoder
+        # 10. action decoder.
         pred = self.action_decoder(head_out, domain_id)              # [B, T, A]
 
         # 11. loss

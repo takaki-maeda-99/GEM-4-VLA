@@ -34,3 +34,15 @@ packages = ["src/vla_project"]
 testpaths = ["tests"]
 addopts = "-q -ra"
 filterwarnings = ["ignore::UserWarning"]
+
+# Pin torch/torchvision to PyTorch's cu128 wheels because the host
+# CUDA driver (12.8.0) is older than the cu130 wheels that uv would
+# otherwise resolve. cu128 covers driver >= 12.6 which our system has.
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
