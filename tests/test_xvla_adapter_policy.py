@@ -180,3 +180,51 @@ def test_from_checkpoint_round_trip(tmp_path: Path) -> None:
         p2.model.action_decoder.fc.weight,
         torch.full_like(p2.model.action_decoder.fc.weight, 0.05),
     )
+
+
+def test_compile_mode_off_default_no_compile_call(monkeypatch) -> None:
+    """compile_mode='off' (default): torch.compile is NOT called."""
+    calls = {"n": 0}
+    real_compile = torch.compile
+
+    def fake_compile(*a, **kw):
+        calls["n"] += 1
+        return real_compile(*a, **kw)
+
+    monkeypatch.setattr(torch, "compile", fake_compile)
+    p, _ = _build_policy()
+    assert calls["n"] == 0
+    # Forward still works.
+    a = p.select_action(_fake_obs())
+    assert a.shape == (C.ACTION_DIM,)
+
+
+def test_compile_mode_invokes_torch_compile(monkeypatch) -> None:
+    """compile_mode != 'off' wraps the model via torch.compile."""
+    received = {"mode": None, "fullgraph": None}
+
+    def fake_compile(model, *, mode=None, fullgraph=None, **_kw):
+        received["mode"] = mode
+        received["fullgraph"] = fullgraph
+        return model  # passthrough — keep stubs functional
+
+    monkeypatch.setattr(torch, "compile", fake_compile)
+
+    model_cfg = VLAPolicyConfig(num_domains=1, num_blocks=4, hidden_dim=32)
+    model = VLAPolicy(model_cfg, _StubSig(), _StubGemma())
+    model.eval()
+    stats = Q99Stats(
+        q01=torch.full((C.ACTION_DIM,), -1.0),
+        q99=torch.full((C.ACTION_DIM,),  1.0),
+        mask=torch.tensor([True] * (C.ACTION_DIM - 1) + [False], dtype=torch.bool),
+    )
+    tok = GemmaPromptTokenizer(model_name=None, _tokenizer=_StubTokenizer())
+    image_tx = SiglipImageTransform(size=C.SIGLIP_IMAGE_SIZE, training=False)
+
+    p = XVLAAdapterPolicy(
+        model=model, tokenizer=tok, image_transform=image_tx, norm_stats=stats,
+        compile_mode="reduce-overhead",
+    )
+    assert received["mode"] == "reduce-overhead"
+    assert received["fullgraph"] is False
+    assert p.compile_mode == "reduce-overhead"
