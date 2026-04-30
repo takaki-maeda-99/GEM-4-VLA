@@ -167,6 +167,24 @@ class LIBEROSimRobot(BaseRobot):
         raw, _reward, _done, _info = self._env.step(a.tolist())
         return self._wrap_obs(raw)
 
+    def check_success(self) -> bool:
+        """Ask the underlying LIBERO env whether the current sim state
+        satisfies the task's BDDL goal. Returns False if not connected."""
+        if self._env is None:
+            return False
+        env = self._env
+        # OffScreenRenderEnv exposes `_check_success()` via robosuite's
+        # ManipulationEnv; LIBERO subclasses override it with the BDDL
+        # success predicate.
+        for accessor in ("_check_success", "check_success"):
+            fn = getattr(env, accessor, None)
+            if callable(fn):
+                try:
+                    return bool(fn())
+                except Exception:
+                    return False
+        return False
+
     def close(self) -> None:
         if self._env is not None:
             try:
