@@ -6,7 +6,7 @@ model:
 vision:
   model_name: google/siglip-so400m-patch14-224
 language:
-  model_name: google/gemma-3n-E2B   # placeholder; substitute the real Gemma4 ID
+  model_name: google/gemma-4-E2B
 data:
   length: 16
 train:

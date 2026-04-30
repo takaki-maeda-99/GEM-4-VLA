@@ -6,8 +6,12 @@ membership alone. See docs/architectures/x_vla_adapter.md for layout.
 """
 
 # === Gemma4 native image token (PaliGemma-style scene placeholder) ===
-# tokenizer.convert_tokens_to_ids('<image_soft_token>') in Gemma4
-IMAGE_SOFT_TOKEN_ID: int = 262144 - 1  # confirmed at runtime in Task 11
+# Verified at runtime against google/gemma-4-E2B tokenizer:
+#   tok.convert_tokens_to_ids('<|image|>') == 258880
+# The literal string '<image_soft_token>' resolves to UNK (id=3) on Gemma4 —
+# do NOT rely on that name. Audio multimodal token '<|audio|>' sits at 258881;
+# our placeholder ranges (action/wrist/soft) all start at 258885 to avoid it.
+IMAGE_SOFT_TOKEN_ID: int = 258880
 
 # === Action queries (carried from vla-gemma-4) ===
 ACTION_TOKEN_BEGIN_IDX: int = 258885   # <unused2968>

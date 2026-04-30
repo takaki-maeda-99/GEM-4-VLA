@@ -28,7 +28,7 @@ class Gemma4Wrapper(nn.Module):
 
     def __init__(
         self,
-        model_name: Optional[str] = "google/gemma-3n-E2B",  # placeholder; verify before training
+        model_name: Optional[str] = "google/gemma-4-E2B",  # verified against HF cache
         freeze: bool = True,
         _skip_load: bool = False,
     ) -> None:
