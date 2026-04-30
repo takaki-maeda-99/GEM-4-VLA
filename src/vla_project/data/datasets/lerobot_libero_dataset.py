@@ -121,9 +121,18 @@ class LeRobotLiberoDataset(IterableDataset):
         }
 
     def __iter__(self) -> Iterator[Dict[str, torch.Tensor]]:
+        # Shard the frame range across DataLoader workers: worker 0 reads
+        # indices [0, N, 2N, ...], worker 1 reads [1, N+1, 2N+1, ...] etc.
+        # This avoids each worker iterating the full dataset (and yielding
+        # duplicate samples) under DataLoader(num_workers > 0).
+        info = torch.utils.data.get_worker_info()
+        if info is None:
+            start, stride = 0, 1
+        else:
+            start, stride = info.id, info.num_workers
         emitted = 0
         # Single-pass iteration. Trainer calls iter(dataloader) again to restart.
-        for i in range(len(self.ds)):
+        for i in range(start, len(self.ds), stride):
             if self.max_samples is not None and emitted >= self.max_samples:
                 return
             sample = self.ds[i]
