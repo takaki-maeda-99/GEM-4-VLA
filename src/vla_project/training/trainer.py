@@ -28,7 +28,13 @@ class TrainerConfig:
     # min_lr_ratio=1.0 → constant LR per group).
     warmup_steps: int = 0
     min_lr_ratio: float = 1.0
-    freeze_steps: int = 0  # leading steps with lr=0 (rarely used)
+    # `freeze_steps` applies ONLY to backbone groups in `freeze_group_names`.
+    # Other groups (head, projections, soft prompts, action queries) run
+    # warmup + decay from step 0 regardless. X-VLA convention: freeze the
+    # Gemma LoRA / SigLIP adapters early so the head learns to consume a
+    # stable representation, then ramp them in.
+    freeze_steps: int = 0
+    freeze_group_names: Tuple[str, ...] = ("gemma_lora", "siglip")
     # Keys whose float tensors stay in their original dtype (do NOT cast to
     # model_dtype). Default protects regression labels: bf16 target makes
     # L1/MSE loss subtly lossy. Add ``loss_weight``, ``return_to_go``, etc.
@@ -174,16 +180,26 @@ class Trainer:
 
                 # Apply LR schedule for the upcoming optimizer step. `step` is
                 # 0-indexed here (incremented after optimizer.step below).
+                # Per-group freeze: backbone groups (gemma_lora, siglip) honor
+                # cfg.freeze_steps; everything else freezes 0 steps (warmup
+                # from step 0).
                 if scheduler_active:
-                    mul = linear_warmup_cosine(
-                        step,
-                        freeze_steps=self.cfg.freeze_steps,
-                        warmup_steps=self.cfg.warmup_steps,
-                        total_steps=self.cfg.max_steps,
-                        base_lr=1.0,
-                        min_lr_ratio=self.cfg.min_lr_ratio,
-                    )
-                    for g, init in zip(self.optimizer.param_groups, initial_lrs):
+                    for g, init, name in zip(
+                        self.optimizer.param_groups, initial_lrs, group_names
+                    ):
+                        eff_freeze = (
+                            self.cfg.freeze_steps
+                            if name in self.cfg.freeze_group_names
+                            else 0
+                        )
+                        mul = linear_warmup_cosine(
+                            step,
+                            freeze_steps=eff_freeze,
+                            warmup_steps=self.cfg.warmup_steps,
+                            total_steps=self.cfg.max_steps,
+                            base_lr=1.0,
+                            min_lr_ratio=self.cfg.min_lr_ratio,
+                        )
                         g["lr"] = init * mul
 
                 self.optimizer.zero_grad()

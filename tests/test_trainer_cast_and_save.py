@@ -223,3 +223,39 @@ def test_no_scheduling_when_warmup_zero_and_min_lr_ratio_one() -> None:
     lrs = [p[0]["train/lr/toy"] for p in acc.log_calls]
     # All identical since scheduler is inactive.
     assert all(lr == init_lr for lr in lrs)
+
+
+def test_freeze_steps_applies_only_to_named_groups() -> None:
+    """freeze_steps applies only to groups listed in freeze_group_names.
+    Head / projection / soft_prompt groups warm up from step 0; gemma_lora
+    stays at lr=0 during the freeze window."""
+    model = _Toy()
+    head_lr = 1e-3
+    backbone_lr = 1e-4
+    opt = torch.optim.SGD([
+        {"name": "action_head", "params": list(model.parameters()), "lr": head_lr},
+    ])
+    # Add a fake "gemma_lora" group with a separate trivial param so we can
+    # observe its lr trajectory without affecting actual training.
+    fake_param = nn.Parameter(torch.zeros(2))
+    opt.add_param_group({"name": "gemma_lora", "params": [fake_param], "lr": backbone_lr})
+    dl = DataLoader(_ToyDS(), batch_size=2, collate_fn=_collate)
+    cfg = TrainerConfig(
+        max_steps=20, freeze_steps=5, warmup_steps=5, min_lr_ratio=0.0,
+    )
+    acc = _StubAccLog()
+    trainer = Trainer(model, opt, cfg, accelerator=acc)
+    trainer.fit(dl)
+
+    head_lrs = [p[0]["train/lr/action_head"] for p in acc.log_calls]
+    bb_lrs   = [p[0]["train/lr/gemma_lora"]  for p in acc.log_calls]
+    # Action head: warmup from step 0, peak at step 5.
+    assert head_lrs[0] == 0.0
+    assert abs(head_lrs[4] - 0.8 * head_lr) < 1e-9   # 4/5 ramp
+    assert abs(head_lrs[5] - head_lr) < 1e-9         # peak
+    # Backbone: frozen until step 5, then ramps over warmup_steps=5 -> peak at step 10.
+    for lr in bb_lrs[:5]:
+        assert lr == 0.0
+    assert abs(bb_lrs[5] - 0.0) < 1e-9               # first warmup step (s=0/5)
+    assert abs(bb_lrs[9] - 0.8 * backbone_lr) < 1e-9 # last warmup step (s=4/5)
+    assert abs(bb_lrs[10] - backbone_lr) < 1e-9      # peak
