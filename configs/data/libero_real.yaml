@@ -1,8 +1,8 @@
 type: libero_lerobot_real
 repo_id: lerobot/libero_spatial_image
-# TODO(portability): host-specific absolute path. Move to <repo>/data/norm_stats/
-# or use ${oc.env:LIBERO_STATS_PATH,...} when CI / collaborator setup matters.
-stats_path: /misc/dl00/takaki/vla-gemma-4/VLA-Adapter/outputs/LIBERO-Spatial-Pro/dataset_statistics.json
+# Default resolves to the in-repo computed JSON; override with the
+# LIBERO_STATS_PATH env var to point at a different stats file.
+stats_path: ${oc.env:LIBERO_STATS_PATH,data/norm_stats/libero_spatial.json}
 unnorm_key: libero_spatial_no_noops
 fps: 10
 episodes: [0]            # single episode for smoke; remove key for full split
