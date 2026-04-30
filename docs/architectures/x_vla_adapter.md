@@ -45,7 +45,7 @@ Diagram: see `architectures.mmd`.
 | Scene Proj          | DomainAwareLinear `D_vis → D`                        | `[B, Ns, D_vis]`, `domain_id [B]`          | `[B, Ns, D]`                             | Yes                      |
 | Wrist Proj          | DomainAwareLinear `D_vis → D`                        | `[B, Nw, D_vis]`, `domain_id [B]`          | `[B, Nw, D]`                             | Yes                      |
 | SoftPrompt Hub      | DomainAwareEmbedding `(num_dom, Ks * D)`             | `domain_id [B]`                            | `[B, Ks, D]`                             | Yes                      |
-| ActionQuery Hub     | DomainAwareEmbedding `(num_dom, Q * D)`              | `domain_id [B]`                            | `[B, Q, D]`                              | Yes                      |
+| ActionQuery Hub     | Shared learnable parameter `[Q, D]`                  | `batch_size B (int)`                       | `[B, Q, D]` (broadcast)                  | Yes                      |
 | Proprio Proj        | DomainAwareLinear `D_prop → D` (head only)           | `[B, D_prop]`, `domain_id [B]`             | `[B, 1, D]`                              | Yes                      |
 | LastAction Proj     | DomainAwareLinear `A → D` (head only)                | `[B, H_act, A]`, `domain_id [B]`           | `[B, H_act, D]`                          | Yes                      |
 | Input Packer        | Build placeholder `input_ids` and overwrite indices  | text ids, scene/wrist/soft/aq embeds       | `input_ids`, `inputs_embeds`, `idx dict` | No                       |
@@ -71,7 +71,7 @@ Diagram: see `architectures.mmd`.
 | `scene_embeds`          | `[B, Ns, D]`                         | bf16   | scene projected to LLM dim |
 | `wrist_embeds`          | `[B, Nw, D]`                         | bf16   | wrist projected to LLM dim |
 | `soft_prompt_embeds`    | `[B, Ks, D]`                         | bf16   | per-domain soft prompts |
-| `action_query_embeds`   | `[B, Q, D]`                          | bf16   | per-domain learnable queries |
+| `action_query_embeds`   | `[B, Q, D]`                          | bf16   | shared learnable queries (broadcast over batch) |
 | `proprio_embed`         | `[B, 1, D]`                          | bf16   | head conditioning `p` |
 | `last_action_embed`     | `[B, H_act, D]`                      | bf16   | head input `x` initialization |
 | `inputs_embeds`         | `[B, L_total, D]`                    | bf16   | LLM token embeddings (post-overwrite) |
@@ -110,7 +110,7 @@ Rules:
 
 1. SigLIP encodes scene and wrist (shared weights, frozen).
 2. Domain-aware projectors (`scene_proj`, `wrist_proj`) lift `D_vis → D`.
-3. SoftPrompt Hub and ActionQuery Hub look up by `domain_id`.
+3. SoftPrompt Hub looks up by `domain_id`. ActionQuery Hub broadcasts a shared `[Q, D]` parameter to `[B, Q, D]`.
 4. Input Packer assembles `input_ids` with placeholders, returns block indices.
 5. PLE: `gemma.get_per_layer_inputs(input_ids)` under `no_grad` (OOM-safe).
 6. Embeds: `gemma.embed_tokens(input_ids)`, then **clone** and overwrite at placeholder indices using SoftPrompt / Scene / Wrist / ActionQuery embeddings.

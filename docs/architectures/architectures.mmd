@@ -43,7 +43,7 @@ flowchart TB
         DI -. id .-> WRN_PROJ[Wrist Proj<br/>DomainAwareLinear 1152 to 1536]
         DI -. id .-> PROP_PROJ[Proprio Proj<br/>DomainAwareLinear Dp to 1536]
         DI -. id .-> LACT_PROJ[LastAction Proj<br/>DomainAwareLinear Da to 1536]
-        DI -. id .-> AQ_HUB[(ActionQuery Hub<br/>nn.Embedding<br/>num_dom x 64 x 1536)]
+        AQ_HUB[(ActionQuery Hub<br/>shared nn.Parameter<br/>64 x 1536, broadcast over B)]
         DI -. id .-> ADEC[Action Decoder<br/>DomainAwareLinear 1536 to Da]
     end
 

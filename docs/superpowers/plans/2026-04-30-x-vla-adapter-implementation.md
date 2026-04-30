@@ -812,26 +812,34 @@ git commit -m "feat(models): per-domain SoftPromptHub under projectors/"
 
 ---
 
-### Task 7: `ActionQueryHub`
+### Task 7: `ActionQueryHub` (SHARED, not per-domain)
 
-Same shape pattern, `[B, Q, D]`. Lives under `models/projectors/`.
+**Design choice:** action queries are *shared* across domains — a single learnable `nn.Parameter` of shape `[Q, D]` broadcast to `[B, Q, D]` in forward. Class is named "Hub" only for naming consistency with `SoftPromptHub`.
 
 **Files:**
 - Create: `src/vla_project/models/projectors/action_queries.py`
 - Create: `tests/test_action_queries.py`
 
-- [ ] **Step 1: Write failing test** (analogous to `SoftPromptHub` test)
+- [ ] **Step 1: Write failing tests**
 
 ```python
 import torch
+
 from vla_project.models.projectors.action_queries import ActionQueryHub
 
 
-def test_shape_and_per_domain_distinct():
-    hub = ActionQueryHub(num_domains=2, num_queries=64, hidden_dim=16)
-    a = hub(torch.tensor([0, 1]))
+def test_shape():
+    hub = ActionQueryHub(num_queries=64, hidden_dim=16)
+    a = hub(2)
     assert a.shape == (2, 64, 16)
-    assert not torch.allclose(a[0], a[1])
+
+
+def test_broadcast_same_across_batch():
+    """Shared queries: every batch entry sees the same [Q, D] tensor."""
+    hub = ActionQueryHub(num_queries=4, hidden_dim=8)
+    a = hub(3)
+    assert torch.equal(a[0], a[1])
+    assert torch.equal(a[0], a[2])
 ```
 
 - [ ] **Step 2: Run, expect FAIL**
@@ -844,17 +852,25 @@ import torch.nn as nn
 
 
 class ActionQueryHub(nn.Module):
-    def __init__(self, num_domains: int, num_queries: int, hidden_dim: int) -> None:
+    """Shared learnable action queries (NOT per-domain).
+
+    Design choice: action queries are shared across domains. The class is
+    kept named "Hub" for naming consistency with SoftPromptHub, but it does
+    not index by domain_id — it broadcasts a single [Q, D] parameter to
+    [B, Q, D] in forward.
+    """
+
+    def __init__(self, num_queries: int, hidden_dim: int) -> None:
         super().__init__()
-        self.num_domains = num_domains
         self.num_queries = num_queries
         self.hidden_dim = hidden_dim
-        self.embedding = nn.Embedding(num_domains, num_queries * hidden_dim)
-        nn.init.normal_(self.embedding.weight, std=0.02)
+        self.queries = nn.Parameter(torch.zeros(num_queries, hidden_dim))
+        nn.init.normal_(self.queries, std=0.02)
 
-    def forward(self, domain_id: torch.Tensor) -> torch.Tensor:
-        B = domain_id.shape[0]
-        return self.embedding(domain_id).view(B, self.num_queries, self.hidden_dim)
+    def forward(self, batch_size: int) -> torch.Tensor:
+        return self.queries.unsqueeze(0).expand(
+            batch_size, self.num_queries, self.hidden_dim
+        )
 ```
 
 - [ ] **Step 4: Run, expect PASS**
@@ -863,7 +879,7 @@ class ActionQueryHub(nn.Module):
 
 ```bash
 git add src/vla_project/models/projectors/action_queries.py tests/test_action_queries.py
-git commit -m "feat(models): per-domain ActionQueryHub under projectors/"
+git commit -m "feat(models): shared ActionQueryHub (not per-domain)"
 ```
 
 ---
@@ -2127,7 +2143,7 @@ class VLAPolicy(nn.Module):
         self.action_decoder = DomainAwareLinear(D, A, cfg.num_domains)
 
         self.soft_prompt_hub = SoftPromptHub(cfg.num_domains, cfg.num_soft_prompt_tokens, D)
-        self.action_query_hub = ActionQueryHub(cfg.num_domains, cfg.num_action_queries, D)
+        self.action_query_hub = ActionQueryHub(cfg.num_action_queries, D)  # shared, not per-domain
 
         self.input_packer = InputPacker(cfg.bos_id, cfg.eos_id, cfg.prompt_max_len)
 
@@ -2168,9 +2184,9 @@ class VLAPolicy(nn.Module):
         scene_e = self.scene_proj(scene_tok, domain_id)        # [B, 256, D]
         wrist_e = self.wrist_proj(wrist_tok, domain_id)        # [B, 256, D]
 
-        # 3. Soft prompts and action queries
+        # 3. Soft prompts (per-domain) and action queries (shared, broadcast)
         soft_e = self.soft_prompt_hub(domain_id)
-        action_q_e = self.action_query_hub(domain_id)
+        action_q_e = self.action_query_hub(B)
 
         # 4. Build input_ids + indices
         packed = self.input_packer(batch["prompt_input_ids"], batch["prompt_attention_mask"])
