@@ -121,9 +121,16 @@ class Trainer:
 
                 # Cross-rank average for reporting; single-GPU is a no-op.
                 gathered = self.accelerator.gather_for_metrics(loss.detach())
-                losses.append(float(gathered.mean().item()))
+                loss_val = float(gathered.mean().item())
+                losses.append(loss_val)
 
                 step += 1
+                # accelerator.log() is a no-op when no tracker was registered
+                # (e.g., default Accelerator()); when log_with='wandb' was set
+                # at construction, this routes to wandb.log(..., step=step).
+                # Logged after step += 1 so the first call is step=1.
+                if hasattr(self.accelerator, "log"):
+                    self.accelerator.log({"train/loss": loss_val}, step=step)
 
                 # Periodic save (only when both save_every and save_dir set).
                 if (
@@ -140,4 +147,7 @@ class Trainer:
         # Final save at end of fit (always when save_dir is set).
         if self.cfg.save_dir is not None:
             self._save(step, save_cfg, save_norm_stats, save_tokenizer_settings)
+        # Close any open tracker run (no-op if none was initialized).
+        if hasattr(self.accelerator, "end_training"):
+            self.accelerator.end_training()
         return losses

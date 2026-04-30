@@ -75,7 +75,22 @@ def main(cfg_path: str) -> None:
     # reads LOCAL_RANK and resolves to cuda:LOCAL_RANK so FSDP / DDP both
     # see the model on the expected device.
     from accelerate import Accelerator
-    accelerator = Accelerator()
+    wandb_cfg = cfg.get("wandb", {})
+    if wandb_cfg.get("enabled", False):
+        accelerator = Accelerator(log_with="wandb")
+        accelerator.init_trackers(
+            project_name=wandb_cfg.get("project", "vla-project"),
+            config=OmegaConf.to_container(cfg, resolve=True),
+            init_kwargs={
+                "wandb": {
+                    "name": wandb_cfg.get("name"),
+                    "tags": list(wandb_cfg.get("tags", [])) or None,
+                }
+            },
+        )
+        print(f"[train] wandb tracking enabled: project={wandb_cfg.get('project', 'vla-project')!r}")
+    else:
+        accelerator = Accelerator()
     device = accelerator.device
     dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
     print(f"[train] device={device} dtype={dtype}")

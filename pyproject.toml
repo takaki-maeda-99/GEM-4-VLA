@@ -22,6 +22,7 @@ dependencies = [
     "easydict>=1.13",
     "matplotlib>=3.10.9",
     "gym==0.25.2",
+    "wandb>=0.24.2",
 ]
 
 [project.optional-dependencies]
