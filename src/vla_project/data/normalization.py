@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 
+import numpy as np
 import torch
 
 
@@ -89,3 +90,44 @@ def normalize_action_q99(action_raw: torch.Tensor, stats: Q99Stats) -> torch.Ten
     denom = (q99 - q01).clamp_min(1e-8)
     norm = (2.0 * (action_raw - q01) / denom - 1.0).clamp(-1.0, 1.0)
     return torch.where(mask, norm, action_raw)
+
+
+def compute_q99_stats(
+    action_arr: "np.ndarray | torch.Tensor",
+    mask: "list[bool] | None" = None,
+) -> Q99Stats:
+    """Compute BOUNDS_Q99 stats from a 2-D array of raw actions.
+
+    Args:
+        action_arr: shape ``[N, A]`` (numpy ndarray or torch.Tensor). Each row
+            is one raw action vector. Larger N gives more stable quantiles.
+        mask: list of ``A`` bools indicating which dims to normalize (``True``)
+            vs pass through (``False``). Defaults to all-True. Length must match
+            ``action_arr.shape[-1]``.
+
+    Returns:
+        Q99Stats with ``q01``, ``q99``, ``mask`` as float32 / bool tensors of
+        shape ``[A]``.
+    """
+    if torch.is_tensor(action_arr):
+        arr = action_arr.detach().cpu().numpy()
+    else:
+        arr = np.asarray(action_arr)
+    if arr.ndim != 2:
+        raise ValueError(
+            f"action_arr must be 2-D [N, A]; got rank {arr.ndim} shape {arr.shape}"
+        )
+    A = arr.shape[1]
+    if mask is None:
+        mask = [True] * A
+    if len(mask) != A:
+        raise ValueError(
+            f"mask length {len(mask)} != action dim {A}"
+        )
+    q01 = np.quantile(arr.astype(np.float32), 0.01, axis=0).astype(np.float32)
+    q99 = np.quantile(arr.astype(np.float32), 0.99, axis=0).astype(np.float32)
+    return Q99Stats(
+        q01=torch.from_numpy(q01),
+        q99=torch.from_numpy(q99),
+        mask=torch.tensor(mask, dtype=torch.bool),
+    )
