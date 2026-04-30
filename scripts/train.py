@@ -70,8 +70,14 @@ def main(cfg_path: str) -> None:
     cfg = OmegaConf.load(cfg_path)
     set_seed(cfg.seed)
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    dtype = torch.bfloat16 if device == "cuda" else torch.float32
+    # Construct Accelerator early so we can read the correct per-rank device.
+    # In single-process mode this is a no-op; under accelerate launch it
+    # reads LOCAL_RANK and resolves to cuda:LOCAL_RANK so FSDP / DDP both
+    # see the model on the expected device.
+    from accelerate import Accelerator
+    accelerator = Accelerator()
+    device = accelerator.device
+    dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
     print(f"[train] device={device} dtype={dtype}")
 
     model_dict = OmegaConf.to_container(cfg.model, resolve=True)
@@ -94,7 +100,11 @@ def main(cfg_path: str) -> None:
         policy, lr=cfg.train.lr,
         soft_lr_coef=cfg.train.soft_lr_coef, weight_decay=cfg.train.weight_decay,
     )
-    trainer = Trainer(policy, optim, TrainerConfig(max_steps=cfg.train.max_steps))
+    trainer = Trainer(
+        policy, optim,
+        TrainerConfig(max_steps=cfg.train.max_steps),
+        accelerator=accelerator,
+    )
     losses = trainer.fit(dl)
     print(f"[train] losses={losses}")
 
