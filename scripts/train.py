@@ -90,6 +90,21 @@ def main(cfg_path: str) -> None:
         lora=lora_cfg,
     )
     policy = VLAPolicy(policy_cfg, vision, gemma).to(device).to(dtype)
+    compile_mode = str(cfg.train.get("compile_mode", "off"))
+    if compile_mode != "off":
+        # `mode in {"default", "reduce-overhead", "max-autotune"}` per torch
+        # docs. fullgraph=False allows graph breaks (Gemma's HF code path has
+        # Python control flow that can't always be traced into a single graph).
+        #
+        # Empirical 2026-05-01 on dl40 A100 (bs=1, 35 blocks, bf16):
+        #   compile_mode=off            -> 400.4 ms / step
+        #   compile_mode='default'      -> 173.3 ms / step  (2.3x faster)
+        #
+        # !! Known limitation: combining compile_mode with model.use_grad_
+        # checkpoint=true triggers an InductorError (KeyError: 'op39') in the
+        # backward compilation. Set use_grad_checkpoint=false when compiling.
+        print(f"[train] applying torch.compile(mode={compile_mode!r}, fullgraph=False)")
+        policy = torch.compile(policy, mode=compile_mode, fullgraph=False)
 
     dl = _build_dataloader(
         cfg, prompt_max_len=policy_cfg.prompt_max_len,
