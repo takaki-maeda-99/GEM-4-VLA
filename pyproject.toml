@@ -32,5 +32,5 @@ packages = ["src/vla_project"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q -ra -p no:launch_testing"
+addopts = "-q -ra"
 filterwarnings = ["ignore::UserWarning"]
