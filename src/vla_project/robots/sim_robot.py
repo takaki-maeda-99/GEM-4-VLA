@@ -120,11 +120,12 @@ class LIBEROSimRobot(BaseRobot):
             raise ValueError(f"scene shape {scene.shape} != expected")
         if wrist.shape != (self.image_size, self.image_size, 3):
             raise ValueError(f"wrist shape {wrist.shape} != expected")
-        # LIBERO renders with the world Y axis flipped relative to
-        # eval_libero_gemma4's reference; mirror that flip here so the
-        # observation matches what the model was trained on.
-        scene = scene[::-1, :, :]
-        wrist = wrist[::-1, :, :]
+        # LIBERO renders with both axes flipped relative to the LeRobot
+        # dataset orientation that the model was trained on. Mirror the
+        # 180-degree rotation used in vla-gemma-4/scripts/gemma4/eval_libero_gemma4.py
+        # (lines 143-154) so closed-loop obs match the dataset distribution.
+        scene = scene[::-1, ::-1, :]
+        wrist = wrist[::-1, ::-1, :]
         proprio = np.concatenate([
             np.asarray(raw["robot0_eef_pos"], dtype=np.float32),
             np.asarray(raw["robot0_eef_quat"], dtype=np.float32),
