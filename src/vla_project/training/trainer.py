@@ -6,9 +6,9 @@ constructor reads env vars set by `accelerate launch`; in single-process
 mode it is a near-no-op.
 """
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -23,6 +23,51 @@ class TrainerConfig:
     grad_clip_norm: float = 1.0
     save_every: Optional[int] = None  # save every N steps; None disables periodic
     save_dir: Optional[str] = None    # parent dir for step_<N>/ checkpoints
+    # Keys whose float tensors stay in their original dtype (do NOT cast to
+    # model_dtype). Default protects regression labels: bf16 target makes
+    # L1/MSE loss subtly lossy. Add ``loss_weight``, ``return_to_go``, etc.
+    # as appropriate for new tasks.
+    keep_dtype_keys: Tuple[str, ...] = ("target_action",)
+
+
+def _cast_tensor_to_device(t: torch.Tensor, device, model_dtype, keep_orig: bool) -> torch.Tensor:
+    t = t.to(device)
+    if t.is_floating_point() and not keep_orig:
+        t = t.to(model_dtype)
+    return t
+
+
+def _cast_batch(
+    batch: Any, device, model_dtype, keep_dtype_keys: Tuple[str, ...]
+) -> Any:
+    """Recursively move tensors in a batch to ``device`` and cast floats to
+    ``model_dtype``. Keys listed in ``keep_dtype_keys`` retain their original
+    float dtype (e.g. regression targets that the loss should compute in fp32).
+
+    Handles nested dicts (e.g. ``{"obs": {"image": ..., "proprio": ...}, "action": ...}``)
+    and tuples/lists. Non-tensor values pass through unchanged.
+    """
+    if isinstance(batch, dict):
+        out = {}
+        for k, v in batch.items():
+            keep = k in keep_dtype_keys
+            if torch.is_tensor(v):
+                out[k] = _cast_tensor_to_device(v, device, model_dtype, keep)
+            elif isinstance(v, dict):
+                out[k] = _cast_batch(v, device, model_dtype, keep_dtype_keys)
+            elif isinstance(v, (list, tuple)):
+                cast = [
+                    _cast_tensor_to_device(x, device, model_dtype, keep)
+                    if torch.is_tensor(x) else x
+                    for x in v
+                ]
+                out[k] = type(v)(cast)
+            else:
+                out[k] = v
+        return out
+    if torch.is_tensor(batch):
+        return _cast_tensor_to_device(batch, device, model_dtype, keep_orig=False)
+    return batch
 
 
 class Trainer:
@@ -106,16 +151,7 @@ class Trainer:
         ema_alpha = 0.1
         while step < self.cfg.max_steps:
             for batch in dataloader:
-                cast_batch = {}
-                for k, v in batch.items():
-                    if not torch.is_tensor(v):
-                        cast_batch[k] = v
-                        continue
-                    v = v.to(device)
-                    if v.is_floating_point():
-                        v = v.to(model_dtype)
-                    cast_batch[k] = v
-                batch = cast_batch
+                batch = _cast_batch(batch, device, model_dtype, self.cfg.keep_dtype_keys)
 
                 self.optimizer.zero_grad()
                 _, loss = self.model(batch)
@@ -167,8 +203,15 @@ class Trainer:
                 if step >= self.cfg.max_steps:
                     break
 
-        # Final save at end of fit (always when save_dir is set).
-        if self.cfg.save_dir is not None:
+        # Final save at end of fit. Skip when the most recent periodic save
+        # already wrote this step (max_steps a multiple of save_every) so we
+        # don't redo identical work.
+        periodic_just_fired = (
+            self.cfg.save_every is not None
+            and step > 0
+            and step % self.cfg.save_every == 0
+        )
+        if self.cfg.save_dir is not None and not periodic_just_fired:
             self._save(step, save_cfg, save_norm_stats, save_tokenizer_settings)
         # Close any open tracker run (no-op if none was initialized).
         if hasattr(self.accelerator, "end_training"):
