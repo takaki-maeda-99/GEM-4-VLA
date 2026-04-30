@@ -11,7 +11,7 @@ class _StubText(nn.Module):
         self.hidden = hidden
         self.embed = nn.Embedding(50, hidden)
 
-    def get_per_layer_inputs(self, input_ids, **kwargs):
+    def get_per_layer_inputs(self, input_ids, inputs_embeds=None):
         B, L = input_ids.shape
         return torch.zeros(B, L, self.layers, 4)
 

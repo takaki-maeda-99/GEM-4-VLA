@@ -43,7 +43,11 @@ class Gemma4Wrapper(nn.Module):
             )
         from transformers import AutoModelForCausalLM
         full = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.bfloat16)
-        self.text_model = getattr(full, "model", full)
+        # Gemma4 layout: Gemma4ForConditionalGeneration -> Gemma4Model -> Gemma4TextModel
+        # The text_model is what owns embed_tokens / get_per_layer_inputs / forward.
+        # Fall back gracefully for older Gemma layouts that don't have language_model.
+        inner = getattr(full, "model", full)
+        self.text_model = getattr(inner, "language_model", inner)
         self.num_layers = self.text_model.config.num_hidden_layers
         if freeze:
             for p in self.parameters():
@@ -57,10 +61,9 @@ class Gemma4Wrapper(nn.Module):
     def precompute_ple(self, input_ids: torch.Tensor) -> torch.Tensor:
         assert self.text_model is not None, "Gemma4Wrapper not loaded"
         with torch.no_grad():
-            # Gemma4 / Gemma3n signature: get_per_layer_inputs(input_ids, **kwargs).
-            # We pass only input_ids; second positional was previously `inputs_embeds`
-            # in some HF revisions and is keyword-only in current ones.
-            return self.text_model.get_per_layer_inputs(input_ids)
+            # Gemma4TextModel.get_per_layer_inputs(input_ids, inputs_embeds).
+            # We want PLE computed from input_ids alone, so pass None for embeds.
+            return self.text_model.get_per_layer_inputs(input_ids, None)
 
     def forward(
         self,
