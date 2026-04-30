@@ -1,0 +1,11 @@
+type: libero_lerobot_real
+repo_id: lerobot/libero_spatial_image
+# Default resolves to the in-repo computed JSON; override with the
+# LIBERO_STATS_PATH env var to point at a different stats file.
+stats_path: ${oc.env:LIBERO_STATS_PATH,data/norm_stats/libero_spatial.json}
+unnorm_key: libero_spatial_no_noops
+fps: 10
+episodes: [0]            # single episode for smoke; remove key for full split
+download_videos: false   # parquet-only LeRobot variant has no video files
+domain_id: 0
+max_samples: 16

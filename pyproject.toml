@@ -6,13 +6,15 @@ requires-python = ">=3.10"
 dependencies = [
     "torch>=2.4",
     "torchvision>=0.19",
-    "transformers>=4.50",  # Gemma3n / Gemma4 PLE landed in 4.50+
+    "transformers>=5.0",   # Gemma4 model_type registered in 5.x; 4.x only knows gemma3n
     "accelerate>=1.0",
     "omegaconf>=2.3",
     "einops>=0.8",
     "tqdm>=4.66",
     "numpy>=1.26",
     "pillow>=10.0",
+    "lerobot>=0.3.3",
+    "huggingface-hub>=0.35.3",
 ]
 
 [project.optional-dependencies]
@@ -41,6 +43,12 @@ filterwarnings = ["ignore::UserWarning"]
 [tool.uv.sources]
 torch = { index = "pytorch-cu128" }
 torchvision = { index = "pytorch-cu128" }
+
+# Override lerobot's optional `transformers<5.0.0` upper cap. We need
+# transformers>=5.x for Gemma4 model_type support; lerobot's core API
+# (LeRobotDataset) does not depend on transformers internals.
+[tool.uv]
+override-dependencies = ["transformers>=5.0"]
 
 [[tool.uv.index]]
 name = "pytorch-cu128"

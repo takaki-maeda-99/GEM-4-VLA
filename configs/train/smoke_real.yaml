@@ -9,8 +9,15 @@ vision:
 language:
   model_name: google/gemma-4-E2B
 data:
-  type: libero_synthetic
-  length: 16
+  type: libero_lerobot_real
+  repo_id: lerobot/libero_spatial_image
+  stats_path: ${oc.env:LIBERO_STATS_PATH,data/norm_stats/libero_spatial.json}
+  unnorm_key: libero_spatial_no_noops
+  fps: 10
+  episodes: [0]
+  download_videos: false
+  domain_id: 0
+  max_samples: 16
 train:
   batch_size: 1
   lr: 1.0e-4
