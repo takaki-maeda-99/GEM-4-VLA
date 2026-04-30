@@ -1,8 +1,29 @@
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Dict, Optional
 
 import torch
 import torch.nn as nn
+
+
+def _apply_lora(model: nn.Module, lora_cfg: Dict[str, Any]) -> None:
+    """Inject peft LoRA adapters into ``model`` in place.
+
+    ``lora_cfg`` keys: ``r`` (int), ``alpha`` (int), ``target_modules`` (list[str]).
+    Optional: ``dropout`` (float, default 0.0).
+
+    peft sets ``requires_grad=True`` on the new ``lora_A`` / ``lora_B`` linears
+    automatically. Caller is responsible for freezing the base model first.
+    """
+    from peft import LoraConfig, inject_adapter_in_model
+
+    cfg = LoraConfig(
+        r=int(lora_cfg["r"]),
+        lora_alpha=int(lora_cfg["alpha"]),
+        target_modules=list(lora_cfg["target_modules"]),
+        lora_dropout=float(lora_cfg.get("dropout", 0.0)),
+        bias="none",
+    )
+    inject_adapter_in_model(cfg, model)
 
 
 @dataclass
@@ -31,6 +52,7 @@ class Gemma4Wrapper(nn.Module):
         model_name: Optional[str] = "google/gemma-4-E2B",  # verified against HF cache
         freeze: bool = True,
         _skip_load: bool = False,
+        lora: Optional[Dict[str, Any]] = None,
     ) -> None:
         super().__init__()
         self.text_model: Optional[nn.Module] = None
@@ -53,6 +75,9 @@ class Gemma4Wrapper(nn.Module):
             for p in self.parameters():
                 p.requires_grad = False
             self.text_model.eval()
+        if lora is not None:
+            _apply_lora(self.text_model, lora)
+            self.text_model.train()  # LoRA layers should be in train mode
 
     def embed_tokens(self, input_ids: torch.Tensor) -> torch.Tensor:
         assert self.text_model is not None, "Gemma4Wrapper not loaded"
