@@ -1,0 +1,36 @@
+[project]
+name = "vla_project"
+version = "0.0.1"
+description = "X-VLA-Adapter: Gemma4 + SigLIP + per-domain VLA-Adapter head"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.4",
+    "torchvision>=0.19",
+    "transformers>=4.50",  # Gemma3n / Gemma4 PLE landed in 4.50+
+    "accelerate>=1.0",
+    "omegaconf>=2.3",
+    "einops>=0.8",
+    "tqdm>=4.66",
+    "numpy>=1.26",
+    "pillow>=10.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-xdist>=3.5",
+    "ruff>=0.6",
+    "mypy>=1.10",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/vla_project"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q -ra -p no:launch_testing"
+filterwarnings = ["ignore::UserWarning"]
