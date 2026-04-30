@@ -6,7 +6,7 @@ __pycache__/
 .ruff_cache/
 outputs/
 checkpoints/
-data/
+/data/
 *.egg-info/
 .DS_Store
 
