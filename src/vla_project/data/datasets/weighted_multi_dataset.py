@@ -7,6 +7,14 @@ index ``i`` from a categorical distribution proportional to the supplied
 iterator exhausts, the mixer restarts that child's iterator (so the mix is
 effectively infinite even if the children are finite).
 
+``seed=None`` produces a fresh non-reproducible sequence on every ``__iter__``
+call. Use an explicit integer seed for repeatable runs.
+
+DataLoader ``num_workers > 0`` footgun: every worker re-runs ``__init__`` and
+``__iter__`` with the same seed, so all workers draw the *same* index sequence.
+TODO(plan-3 follow-up): combine ``self._seed`` with ``get_worker_info().id``
+inside ``__iter__`` if multi-worker training is added.
+
 This is the data-side analogue of X-VLA's `DATA_WEIGHTS` weighted sampler.
 """
 from __future__ import annotations
@@ -32,6 +40,8 @@ class WeightedMultiDataset(IterableDataset):
                 f"len(weights)={len(weights)} != len(datasets)={len(datasets)}"
             )
         w = np.asarray(weights, dtype=np.float64)
+        if not np.isfinite(w).all():
+            raise ValueError(f"non-finite weight in {list(weights)!r}")
         if (w < 0).any():
             raise ValueError(f"negative weight in {list(weights)!r}")
         total = float(w.sum())
@@ -50,5 +60,14 @@ class WeightedMultiDataset(IterableDataset):
             try:
                 yield next(iters[idx])
             except StopIteration:
+                # Restart exhausted child. If the restart yields no samples,
+                # surface a clear error rather than letting PEP 479 convert the
+                # inner StopIteration into a generic RuntimeError.
                 iters[idx] = iter(self._datasets[idx])
-                yield next(iters[idx])
+                try:
+                    yield next(iters[idx])
+                except StopIteration as e:
+                    raise RuntimeError(
+                        f"child dataset {idx} produced no samples on restart; "
+                        f"WeightedMultiDataset requires non-empty children"
+                    ) from e
