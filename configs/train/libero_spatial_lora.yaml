@@ -29,8 +29,9 @@ train:
   lr: 1.0e-4
   weight_decay: 0.01
   max_steps: 10000
-  warmup_steps: 500            # linear warmup 0 -> peak over the first 500 steps
-  min_lr_ratio: 0.1            # cosine decay end at 10% of peak
+  freeze_steps: 1000           # initial steps with lr=0 across all groups
+  warmup_steps: 2000           # linear warmup 0 -> peak (after freeze, over 2000 steps)
+  min_lr_ratio: 0.1            # cosine decay floor at 10% of peak (reached at max_steps)
   lr_coefs:                    # X-VLA-Adapter convention; matches optim.py defaults
     gemma_lora:     0.1
     siglip:         0.1
