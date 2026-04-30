@@ -5,7 +5,7 @@ model:
   num_blocks: 35
   use_grad_checkpoint: true
   use_wrist_pool: true
-  wrist_pool_tokens: 49
+  wrist_pool_tokens: 64
   loss_type: huber
   huber_beta: 0.1
 vision:

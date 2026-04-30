@@ -29,7 +29,13 @@ class VLAPolicyConfig:
     num_scene_tokens: int = C.NUM_SCENE_TOKENS  # NEW
     num_wrist_tokens: int = C.NUM_WRIST_TOKENS  # NEW (raw from SigLIP)
     use_wrist_pool: bool = False                # NEW
-    wrist_pool_tokens: int = 49                 # NEW (when use_wrist_pool=True)
+    # NEW (when use_wrist_pool=True). Default 64 (8x8) chosen empirically:
+    # SigLIP gives 16x16 patches, so factor=2 -> exact 2x2 mean pool (no
+    # adaptive interpolation overhead) AND seq length aligns to a multiple
+    # of 8 for friendlier cuBLAS/FlashAttention tiles. 7x7 (=49 from the
+    # original X-VLA spec) was 16% slower per-step on A100 due to non-integer
+    # downsample factor (16/7≈2.29). See Plan 9 follow-up benchmark.
+    wrist_pool_tokens: int = 64
     bos_id: int = 2
     eos_id: int = 1
     loss_type: str = "l1"  # or "huber"
@@ -86,10 +92,18 @@ class VLAPolicy(nn.Module):
         )
 
     def _pool_wrist(self, wrist_tok: torch.Tensor) -> torch.Tensor:
-        """Adaptive-pool a (B, N, D) sequence by reshaping to a square grid.
+        """Spatially average-pool a (B, N, D) wrist token sequence.
 
-        Assumes ``N`` is a perfect square (16x16 = 256 for SigLIP@224 / patch14).
-        Pools to a grid of side sqrt(self._effective_num_wrist) and flattens back.
+        Assumes ``N`` is a perfect square (16x16 = 256 for SigLIP@224 /
+        patch14). Pools to a grid of side ``sqrt(self._effective_num_wrist)``.
+
+        Fast path (integer downsample factor, e.g. 16 -> 8 = factor 2):
+        ``view + mean`` over the per-block dims. Avoids transpose+contiguous
+        and uses a clean 2x2 (or kxk) mean reduction instead of the
+        adaptive_avg_pool2d kernel — measurably faster at bs=1 on A100.
+
+        Slow path (non-integer factor, e.g. 16 -> 7): fall back to
+        ``adaptive_avg_pool2d`` with overlapping windows.
         """
         import math
         B, N, D = wrist_tok.shape
@@ -101,6 +115,14 @@ class VLAPolicy(nn.Module):
             raise ValueError(
                 f"wrist_pool_tokens {self._effective_num_wrist} is not a perfect square"
             )
+        if side == pooled_side:
+            return wrist_tok  # no-op
+        if side % pooled_side == 0:
+            # Integer-factor fast path: reshape and reduce.
+            f = side // pooled_side
+            g = wrist_tok.view(B, pooled_side, f, pooled_side, f, D)
+            return g.mean(dim=(2, 4)).reshape(B, pooled_side * pooled_side, D)
+        # Non-integer factor: adaptive pool with channel-first layout.
         grid = wrist_tok.transpose(1, 2).reshape(B, D, side, side)
         pooled = torch.nn.functional.adaptive_avg_pool2d(grid, (pooled_side, pooled_side))
         return pooled.reshape(B, D, pooled_side * pooled_side).transpose(1, 2)
