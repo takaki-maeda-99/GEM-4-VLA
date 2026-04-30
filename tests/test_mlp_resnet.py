@@ -14,3 +14,11 @@ def test_stack_forward_shape():
     p = torch.randn(B, 1, D)
     y = model(x, h_a=h_a, h_t=h_t, p=p)
     assert y.shape == (B, T, 7)
+
+
+def test_all_block_gates_init_zero():
+    from vla_project.models.action_heads.mlp_resnet import MLPResNet
+    m = MLPResNet(num_blocks=35, input_dim=7 * 16, hidden_dim=16,
+                  output_dim=16, action_dim=7)
+    for blk in m.blocks:
+        assert torch.equal(blk.gating_factor, torch.zeros(1))
