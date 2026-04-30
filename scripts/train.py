@@ -129,15 +129,24 @@ def main(cfg_path: str) -> None:
         language_model_name=cfg.language.model_name,
     )
 
+    lr_coefs = cfg.train.get("lr_coefs", None)
+    if lr_coefs is not None:
+        lr_coefs = OmegaConf.to_container(lr_coefs, resolve=True)
     optim = build_optimizer(
         policy, lr=cfg.train.lr,
-        soft_lr_coef=cfg.train.soft_lr_coef, weight_decay=cfg.train.weight_decay,
+        soft_lr_coef=cfg.train.get("soft_lr_coef"),
+        weight_decay=cfg.train.weight_decay,
+        lr_coefs=lr_coefs,
     )
-    trainer = Trainer(
-        policy, optim,
-        TrainerConfig(max_steps=cfg.train.max_steps),
-        accelerator=accelerator,
+    trainer_cfg = TrainerConfig(
+        max_steps=cfg.train.max_steps,
+        save_every=cfg.train.get("save_every"),
+        save_dir=cfg.train.get("save_dir"),
+        warmup_steps=int(cfg.train.get("warmup_steps", 0)),
+        min_lr_ratio=float(cfg.train.get("min_lr_ratio", 1.0)),
+        freeze_steps=int(cfg.train.get("freeze_steps", 0)),
     )
+    trainer = Trainer(policy, optim, trainer_cfg, accelerator=accelerator)
     losses = trainer.fit(dl)
     print(f"[train] losses={losses}")
 

@@ -27,9 +27,17 @@ data:
 train:
   batch_size: 8
   lr: 1.0e-4
-  soft_lr_coef: 1.0
   weight_decay: 0.01
   max_steps: 10000
+  warmup_steps: 500            # linear warmup 0 -> peak over the first 500 steps
+  min_lr_ratio: 0.1            # cosine decay end at 10% of peak
+  lr_coefs:                    # X-VLA-Adapter convention; matches optim.py defaults
+    gemma_lora:     0.1
+    siglip:         0.1
+    soft_prompts:   0.1
+    action_queries: 1.0
+    projections:    1.0
+    action_head:    1.0
   save_every: 5000
   save_dir: outputs/libero_spatial_lora_r64_2026-05-01/checkpoints
 wandb:

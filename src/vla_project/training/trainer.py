@@ -23,6 +23,12 @@ class TrainerConfig:
     grad_clip_norm: float = 1.0
     save_every: Optional[int] = None  # save every N steps; None disables periodic
     save_dir: Optional[str] = None    # parent dir for step_<N>/ checkpoints
+    # LR schedule: linear warmup over `warmup_steps`, then cosine decay to
+    # `min_lr_ratio * init_lr`. Defaults disable scheduling (warmup=0,
+    # min_lr_ratio=1.0 → constant LR per group).
+    warmup_steps: int = 0
+    min_lr_ratio: float = 1.0
+    freeze_steps: int = 0  # leading steps with lr=0 (rarely used)
     # Keys whose float tensors stay in their original dtype (do NOT cast to
     # model_dtype). Default protects regression labels: bf16 target makes
     # L1/MSE loss subtly lossy. Add ``loss_weight``, ``return_to_go``, etc.
@@ -142,6 +148,19 @@ class Trainer:
         device = first_param.device
         model_dtype = first_param.dtype
 
+        # Snapshot per-group initial lrs for the scheduler (each group keeps
+        # its own coefficient applied via build_optimizer; the scheduler only
+        # supplies a shared multiplier in [0, 1]).
+        initial_lrs = [g["lr"] for g in self.optimizer.param_groups]
+        group_names = [g.get("name", f"group_{i}") for i, g in enumerate(self.optimizer.param_groups)]
+        scheduler_active = (
+            self.cfg.warmup_steps > 0
+            or self.cfg.min_lr_ratio < 1.0
+            or self.cfg.freeze_steps > 0
+        )
+        if scheduler_active:
+            from vla_project.training.schedulers import linear_warmup_cosine
+
         losses: List[float] = []
         step = 0
         last_t = time.perf_counter()
@@ -152,6 +171,20 @@ class Trainer:
         while step < self.cfg.max_steps:
             for batch in dataloader:
                 batch = _cast_batch(batch, device, model_dtype, self.cfg.keep_dtype_keys)
+
+                # Apply LR schedule for the upcoming optimizer step. `step` is
+                # 0-indexed here (incremented after optimizer.step below).
+                if scheduler_active:
+                    mul = linear_warmup_cosine(
+                        step,
+                        freeze_steps=self.cfg.freeze_steps,
+                        warmup_steps=self.cfg.warmup_steps,
+                        total_steps=self.cfg.max_steps,
+                        base_lr=1.0,
+                        min_lr_ratio=self.cfg.min_lr_ratio,
+                    )
+                    for g, init in zip(self.optimizer.param_groups, initial_lrs):
+                        g["lr"] = init * mul
 
                 self.optimizer.zero_grad()
                 _, loss = self.model(batch)
@@ -181,15 +214,17 @@ class Trainer:
                 # at construction, this routes to wandb.log(..., step=step).
                 # Logged after step += 1 so the first call is step=1.
                 if hasattr(self.accelerator, "log"):
-                    self.accelerator.log(
-                        {
-                            "train/loss":         loss_val,
-                            "train/step_time_ms": step_time_s * 1000.0,
-                            "train/progress_pct": progress_pct,
-                            "train/eta_s":        eta_s,
-                        },
-                        step=step,
-                    )
+                    payload = {
+                        "train/loss":         loss_val,
+                        "train/step_time_ms": step_time_s * 1000.0,
+                        "train/progress_pct": progress_pct,
+                        "train/eta_s":        eta_s,
+                    }
+                    # Per-group lr is informative when scheduling is active and
+                    # also useful as a sanity check for the per-group coefs.
+                    for name, g in zip(group_names, self.optimizer.param_groups):
+                        payload[f"train/lr/{name}"] = g["lr"]
+                    self.accelerator.log(payload, step=step)
 
                 # Periodic save (only when both save_every and save_dir set).
                 if (

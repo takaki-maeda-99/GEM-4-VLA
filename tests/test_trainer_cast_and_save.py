@@ -148,3 +148,78 @@ def test_final_save_still_fires_when_unaligned(tmp_path: Path) -> None:
     # Periodic at 2, 4; final at 5.
     dirs = sorted(p.name for p in tmp_path.iterdir())
     assert dirs == ["step_2", "step_4", "step_5"]
+
+
+# ---------- LR scheduler integration ----------
+
+class _StubAccLog:
+    is_main_process = True
+
+    def __init__(self) -> None:
+        self.log_calls = []
+
+    def prepare(self, *args):
+        return args if len(args) > 1 else args[0]
+
+    def backward(self, loss):
+        loss.backward()
+
+    def clip_grad_norm_(self, params, max_norm):
+        return torch.nn.utils.clip_grad_norm_(params, max_norm)
+
+    def gather_for_metrics(self, t):
+        return t.unsqueeze(0)
+
+    def unwrap_model(self, m):
+        return m
+
+    def wait_for_everyone(self):
+        pass
+
+    def log(self, payload, step=None):
+        self.log_calls.append((dict(payload), step))
+
+    def end_training(self):
+        pass
+
+
+def test_warmup_ramps_lr_from_zero_to_init() -> None:
+    """warmup_steps=10: at step 0 → lr=0; at step 10 → lr=init; min_lr_ratio=0
+    forces post-warmup to enter cosine decay reaching 0 at total_steps."""
+    model = _Toy()
+    init_lr = 1e-3
+    opt = torch.optim.SGD(model.parameters(), lr=init_lr)
+    # tag the group with a name so the per-group log key works
+    opt.param_groups[0]["name"] = "toy"
+    dl = DataLoader(_ToyDS(), batch_size=2, collate_fn=_collate)
+    cfg = TrainerConfig(max_steps=20, warmup_steps=10, min_lr_ratio=0.0)
+    acc = _StubAccLog()
+    trainer = Trainer(model, opt, cfg, accelerator=acc)
+    trainer.fit(dl)
+
+    lrs = [p[0]["train/lr/toy"] for p in acc.log_calls]
+    # Step 0 used lr=0 (logged at step=1 entry); step 9 used lr=9/10*init.
+    # The logged lrs are AFTER the schedule applied for the just-completed step.
+    assert lrs[0] == 0.0
+    assert abs(lrs[9] - 0.9 * init_lr) < 1e-9
+    # Step 10 (just past warmup): lr = init * (min + (1-min)*cos(0)) = init.
+    assert abs(lrs[10] - init_lr) < 1e-9
+    # Final step's lr decayed well below peak (cosine end with min_lr_ratio=0
+    # at step=N-1 / N=0.9 progress -> ~0.024 × init_lr).
+    assert lrs[-1] < 0.05 * init_lr
+
+
+def test_no_scheduling_when_warmup_zero_and_min_lr_ratio_one() -> None:
+    """Defaults: warmup=0, min_lr_ratio=1.0 → constant LR."""
+    model = _Toy()
+    init_lr = 5e-4
+    opt = torch.optim.SGD(model.parameters(), lr=init_lr)
+    opt.param_groups[0]["name"] = "toy"
+    dl = DataLoader(_ToyDS(), batch_size=2, collate_fn=_collate)
+    cfg = TrainerConfig(max_steps=4)  # defaults: warmup=0, min_lr_ratio=1.0
+    acc = _StubAccLog()
+    trainer = Trainer(model, opt, cfg, accelerator=acc)
+    trainer.fit(dl)
+    lrs = [p[0]["train/lr/toy"] for p in acc.log_calls]
+    # All identical since scheduler is inactive.
+    assert all(lr == init_lr for lr in lrs)
