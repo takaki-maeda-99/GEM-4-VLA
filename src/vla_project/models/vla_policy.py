@@ -12,6 +12,7 @@ from vla_project.models.projectors.action_queries import ActionQueryHub
 from vla_project.models.projectors.domain_aware_linear import DomainAwareLinear
 from vla_project.models.projectors.soft_prompts import SoftPromptHub
 from vla_project.training.losses import masked_l1, masked_huber
+from vla_project.training.losses_ee6d import ee6d_loss_components
 
 
 @dataclass
@@ -38,8 +39,13 @@ class VLAPolicyConfig:
     wrist_pool_tokens: int = 64
     bos_id: int = 2
     eos_id: int = 1
-    loss_type: str = "l1"  # or "huber"
+    loss_type: str = "l1"  # or "huber" or "ee6d"
     huber_beta: float = 0.1
+    # EE6D loss only: per-channel weights. Defaults equal so the total roughly
+    # matches the units of native L1 (channel-mean-normalized within each group).
+    ee6d_w_pos: float = 1.0
+    ee6d_w_rot: float = 1.0
+    ee6d_w_grip: float = 1.0
     use_grad_checkpoint: bool = False
 
 
@@ -202,10 +208,22 @@ class VLAPolicy(nn.Module):
         pred = self.action_decoder(head_out, domain_id)              # [B, T, A]
 
         # 11. loss
+        target_a = batch["target_action"]
+        amask = batch["action_mask"]
         if cfg.loss_type == "l1":
-            loss = masked_l1(pred, batch["target_action"], batch["action_mask"])
+            loss = masked_l1(pred, target_a, amask)
         elif cfg.loss_type == "huber":
-            loss = masked_huber(pred, batch["target_action"], batch["action_mask"], beta=cfg.huber_beta)
+            loss = masked_huber(pred, target_a, amask, beta=cfg.huber_beta)
+        elif cfg.loss_type == "ee6d":
+            comps = ee6d_loss_components(pred, target_a, amask)
+            loss = (
+                cfg.ee6d_w_pos * comps["pos"]
+                + cfg.ee6d_w_rot * comps["rot"]
+                + cfg.ee6d_w_grip * comps["grip"]
+            )
+            # Expose per-channel components so the trainer can log them to
+            # wandb without changing forward()'s (pred, loss) contract.
+            self._last_loss_info = {f"train/loss/{k}": v.detach() for k, v in comps.items()}
         else:
             raise ValueError(f"unknown loss_type: {cfg.loss_type}")
 

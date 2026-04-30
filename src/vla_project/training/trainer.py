@@ -246,6 +246,14 @@ class Trainer:
                     # also useful as a sanity check for the per-group coefs.
                     for name, g in zip(group_names, self.optimizer.param_groups):
                         payload[f"train/lr/{name}"] = g["lr"]
+                    # EE6D (or any other model that exposes per-channel loss
+                    # components) attaches them under `_last_loss_info` so we
+                    # can plot pos / rot / grip separately without changing
+                    # the forward() signature.
+                    extra = getattr(underlying, "_last_loss_info", None)
+                    if extra:
+                        for k, v in extra.items():
+                            payload[k] = float(v.item()) if torch.is_tensor(v) else float(v)
                     self.accelerator.log(payload, step=step)
 
                 # Periodic save (only when both save_every and save_dir set).

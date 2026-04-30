@@ -162,3 +162,116 @@ def test_anchor_offsets_validations() -> None:
         anchor_offsets(window_seconds=0.0, num_anchors=10, fps=10)
     with pytest.raises(ValueError):
         anchor_offsets(window_seconds=4.0, num_anchors=10, fps=0)
+
+
+# ---------- matrix_to_axis_angle ----------
+
+from vla_project.data.transforms.action_alignment import (
+    action20_to_ee_delta,
+    matrix_to_axis_angle,
+)
+
+
+def test_axis_angle_identity_is_zero() -> None:
+    R = torch.eye(3).expand(5, 3, 3)
+    aa = matrix_to_axis_angle(R)
+    assert torch.allclose(aa, torch.zeros(5, 3), atol=1e-6)
+
+
+def test_axis_angle_pure_x_rotation() -> None:
+    """Rx(π/3) → axis-angle = (π/3, 0, 0)."""
+    theta = math.pi / 3
+    R = torch.tensor([
+        [1.0, 0.0, 0.0],
+        [0.0, math.cos(theta), -math.sin(theta)],
+        [0.0, math.sin(theta),  math.cos(theta)],
+    ])
+    aa = matrix_to_axis_angle(R)
+    expected = torch.tensor([theta, 0.0, 0.0])
+    assert torch.allclose(aa, expected, atol=1e-5)
+
+
+def test_axis_angle_pure_y_rotation_negative() -> None:
+    """Ry(-π/4) → axis-angle = (0, -π/4, 0)."""
+    theta = -math.pi / 4
+    R = torch.tensor([
+        [ math.cos(theta), 0.0, math.sin(theta)],
+        [ 0.0,             1.0, 0.0],
+        [-math.sin(theta), 0.0, math.cos(theta)],
+    ])
+    aa = matrix_to_axis_angle(R)
+    expected = torch.tensor([0.0, theta, 0.0])
+    assert torch.allclose(aa, expected, atol=1e-5)
+
+
+def test_axis_angle_round_trip_via_aa_to_matrix() -> None:
+    """aa → R (via Rodrigues from quat) → aa recovers the input."""
+    torch.manual_seed(7)
+    # Random axis-angles with magnitudes well below π to avoid the singularity.
+    aa_in = torch.randn(20, 3) * 0.3   # magnitudes ~ 0.3 rad
+    # Build R via quaternion: q = (sin(θ/2)*n, cos(θ/2)).
+    theta = aa_in.norm(dim=-1, keepdim=True).clamp_min(1e-9)
+    n = aa_in / theta
+    q_xyz = torch.sin(theta / 2) * n
+    q_w = torch.cos(theta / 2)
+    q = torch.cat([q_xyz, q_w], dim=-1)  # scalar-last
+    R = quat_to_matrix(q)
+    aa_out = matrix_to_axis_angle(R)
+    assert torch.allclose(aa_in, aa_out, atol=1e-5)
+
+
+# ---------- action20_to_ee_delta ----------
+
+def test_ee_delta_identity_when_pred_equals_current() -> None:
+    """pred = current pose → delta xyz=0, aa=0, gripper passthrough."""
+    pos = torch.tensor([0.5, 0.1, 0.3])
+    quat = torch.tensor([0.0, 0.0, 0.0, 1.0])
+    gripper = torch.tensor([0.02])
+    proprio = torch.cat([pos, quat, gripper])
+    pad = torch.zeros(10)
+    pred = torch.cat([
+        pos,
+        torch.tensor([1.0, 0.0, 0.0, 0.0, 1.0, 0.0]),  # identity rot6d
+        torch.tensor([0.04]),                          # different gripper
+        pad,
+    ])
+    delta = action20_to_ee_delta(pred, proprio)
+    assert delta.shape == (7,)
+    assert torch.allclose(delta[0:3], torch.zeros(3), atol=1e-6)
+    assert torch.allclose(delta[3:6], torch.zeros(3), atol=1e-6)
+    assert abs(float(delta[6]) - 0.04) < 1e-6  # gripper passthrough
+
+
+def test_ee_delta_pure_translation() -> None:
+    """pred xyz != current → delta xyz exact; rot delta zero."""
+    proprio = torch.tensor([0.5, 0.1, 0.3, 0.0, 0.0, 0.0, 1.0, 0.02])
+    pad = torch.zeros(10)
+    pred = torch.cat([
+        torch.tensor([0.7, 0.2, 0.4]),                 # pos shift
+        torch.tensor([1.0, 0.0, 0.0, 0.0, 1.0, 0.0]),  # identity rot6d
+        torch.tensor([0.02]),
+        pad,
+    ])
+    delta = action20_to_ee_delta(pred, proprio)
+    assert torch.allclose(delta[0:3], torch.tensor([0.2, 0.1, 0.1]), atol=1e-6)
+    assert torch.allclose(delta[3:6], torch.zeros(3), atol=1e-5)
+
+
+def test_ee_delta_batched_anchors() -> None:
+    """Vectorize over a chunk of T anchors with a single current proprio."""
+    T = 30
+    proprio = torch.tensor([0.5, 0.1, 0.3, 0.0, 0.0, 0.0, 1.0, 0.02])
+    pred = torch.zeros(T, 20)
+    pred[:, 0:3] = proprio[0:3]                # all anchors at current pos
+    pred[:, 3:9] = torch.tensor([1.0, 0.0, 0.0, 0.0, 1.0, 0.0])  # identity rot6d
+    pred[:, 9] = 0.02
+    delta = action20_to_ee_delta(pred, proprio.unsqueeze(0).expand(T, -1))
+    assert delta.shape == (T, 7)
+    assert torch.allclose(delta[:, 0:6], torch.zeros(T, 6), atol=1e-6)
+
+
+def test_ee_delta_rejects_wrong_shapes() -> None:
+    with pytest.raises(ValueError):
+        action20_to_ee_delta(torch.zeros(19), torch.zeros(8))
+    with pytest.raises(ValueError):
+        action20_to_ee_delta(torch.zeros(20), torch.zeros(7))

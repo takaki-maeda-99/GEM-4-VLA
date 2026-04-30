@@ -133,6 +133,85 @@ def rot6d_to_quat(rot6d: torch.Tensor) -> torch.Tensor:
     return matrix_to_quat(rot6d_to_matrix(rot6d))
 
 
+def matrix_to_axis_angle(R: torch.Tensor) -> torch.Tensor:
+    """Rotation matrix (..., 3, 3) → axis-angle vector (..., 3).
+
+    Output is ``θ * n`` where ``n`` is the unit rotation axis and
+    ``θ ∈ [0, π]``. Identity rotations within numerical tolerance return
+    a zero vector. ``θ → π`` is mildly unstable (sin θ vanishes); this
+    matters less for closed-loop control where per-anchor deltas are
+    small (≪ π for any sensible anchor spacing).
+
+    Used to convert an EE6D abs-pose anchor → LIBERO native delta-EE
+    action (whose rotation channel is OSC_POSE axis-angle).
+    """
+    if R.shape[-2:] != (3, 3):
+        raise ValueError(f"R must end in (3, 3); got {tuple(R.shape)}")
+    cos_t = ((R[..., 0, 0] + R[..., 1, 1] + R[..., 2, 2]) - 1.0) * 0.5
+    cos_t = cos_t.clamp(-1.0 + 1e-7, 1.0 - 1e-7)
+    theta = torch.acos(cos_t)  # (...,) ∈ [0, π]
+    # 2 sin θ * n_skew  =  R - R^T  (off-diagonal anti-symmetric part)
+    skew = torch.stack([
+        R[..., 2, 1] - R[..., 1, 2],
+        R[..., 0, 2] - R[..., 2, 0],
+        R[..., 1, 0] - R[..., 0, 1],
+    ], dim=-1)  # (..., 3)
+    sin_t = torch.sin(theta).unsqueeze(-1).clamp_min(1e-7)
+    axis = skew / (2.0 * sin_t)
+    aa = theta.unsqueeze(-1) * axis
+    near_zero = (theta.unsqueeze(-1) < 1e-6).expand_as(aa)
+    return torch.where(near_zero, torch.zeros_like(aa), aa)
+
+
+def action20_to_ee_delta(
+    pred_anchor: torch.Tensor,
+    current_proprio: torch.Tensor,
+) -> torch.Tensor:
+    """Convert an EE6D abs-pose anchor (20-dim) → LIBERO native delta-EE
+    action (7-dim) using the current robot proprio as the reference frame.
+
+    LIBERO's OSC_POSE controller expects::
+
+        action = [Δx, Δy, Δz, Δrx, Δry, Δrz, gripper_cmd]
+
+    where the rotation channel is axis-angle (radians). This helper does
+    NOT touch the gripper-qpos→command mapping — that lives in the policy
+    wrapper because it depends on the dataset's gripper qpos range.
+
+    Args:
+        pred_anchor: (..., 20) X-VLA EE6D action ``[xyz, rot6d, gripper, pad]``.
+            Typically one anchor of a chunk (caller iterates over anchors).
+        current_proprio: (..., 8) current robot EE proprio
+            ``[eef_pos(3), eef_quat(4 xyzw), gripper_qpos(1)]``.
+
+    Returns:
+        (..., 7) tensor ``[Δxyz, Δaxis_angle, gripper_qpos]``. The 7th slot
+        is the *raw* predicted gripper qpos; convert to command externally.
+    """
+    if pred_anchor.shape[-1] != 20:
+        raise ValueError(
+            f"pred_anchor last dim must be 20 (EE6D); got {pred_anchor.shape[-1]}"
+        )
+    if current_proprio.shape[-1] != 8:
+        raise ValueError(
+            f"current_proprio last dim must be 8 (LIBERO); got {current_proprio.shape[-1]}"
+        )
+    target_pos = pred_anchor[..., 0:3]
+    target_rot6d = pred_anchor[..., 3:9]
+    pred_gripper = pred_anchor[..., 9:10]
+
+    cur_pos = current_proprio[..., 0:3]
+    cur_quat = current_proprio[..., 3:7]
+
+    delta_xyz = target_pos - cur_pos
+    R_target = rot6d_to_matrix(target_rot6d)
+    R_current = quat_to_matrix(cur_quat)
+    R_delta = R_target @ R_current.transpose(-1, -2)
+    delta_aa = matrix_to_axis_angle(R_delta)
+
+    return torch.cat([delta_xyz, delta_aa, pred_gripper], dim=-1)
+
+
 def ee_pose_to_action20(
     pos: torch.Tensor,
     quat: torch.Tensor,

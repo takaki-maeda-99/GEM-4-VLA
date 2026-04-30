@@ -199,6 +199,83 @@ def test_compile_mode_off_default_no_compile_call(monkeypatch) -> None:
     assert a.shape == (C.ACTION_DIM,)
 
 
+def _build_ee6d_policy(action_chunk_len: int = 30) -> tuple[XVLAAdapterPolicy, VLAPolicy]:
+    """Build a stub-backed policy in EE6D mode (action_dim=20, T anchors)."""
+    model_cfg = VLAPolicyConfig(
+        num_domains=1, num_blocks=4, hidden_dim=32,
+        action_dim=20, action_chunk_len=action_chunk_len,
+        loss_type="ee6d",
+    )
+    model = VLAPolicy(model_cfg, _StubSig(), _StubGemma())
+    model.eval()
+    # native-style stats are still provided (norm_stats has action dim 7);
+    # the policy's ee6d path doesn't use them for the action itself, only
+    # the gripper qpos→cmd map (which is hardcoded to [0, 0.04]).
+    stats = Q99Stats(
+        q01=torch.full((C.ACTION_DIM,), -1.0, dtype=torch.float32),
+        q99=torch.full((C.ACTION_DIM,),  1.0, dtype=torch.float32),
+        mask=torch.tensor([True] * (C.ACTION_DIM - 1) + [False], dtype=torch.bool),
+    )
+    tok = GemmaPromptTokenizer(model_name=None, _tokenizer=_StubTokenizer())
+    image_tx = SiglipImageTransform(size=C.SIGLIP_IMAGE_SIZE, training=False)
+    p = XVLAAdapterPolicy(
+        model=model, tokenizer=tok, image_transform=image_tx, norm_stats=stats,
+        action_chunk_len=action_chunk_len,
+        domain_id=0,
+        action_format="ee6d",
+    )
+    return p, model
+
+
+def test_ee6d_select_action_returns_7dim_libero_native_shape() -> None:
+    """EE6D model emits 20-dim anchors internally; the policy must return
+    a 7-dim LIBERO-native delta-EE action per call."""
+    p, _ = _build_ee6d_policy(action_chunk_len=30)
+    a = p.select_action(_fake_obs())
+    assert isinstance(a, np.ndarray)
+    assert a.shape == (7,)
+    assert a.dtype == np.float32
+    assert np.isfinite(a).all()
+    # Gripper command must lie in [-1, +1] (OSC_POSE convention).
+    assert -1.0 - 1e-6 <= float(a[6]) <= 1.0 + 1e-6
+
+
+def test_ee6d_anchor_chunk_size_matches_action_chunk_len() -> None:
+    """30 calls between forward passes when action_chunk_len=30."""
+    p, model = _build_ee6d_policy(action_chunk_len=30)
+    calls = {"n": 0}
+    orig = model.forward
+
+    def counted(batch):
+        calls["n"] += 1
+        return orig(batch)
+
+    p.model.forward = counted  # type: ignore[assignment]
+    obs = _fake_obs()
+    for _ in range(30):
+        p.select_action(obs)
+    assert calls["n"] == 1
+    p.select_action(obs)
+    assert calls["n"] == 2
+
+
+def test_ee6d_invalid_action_format_raises() -> None:
+    import pytest
+    model_cfg = VLAPolicyConfig(num_domains=1, num_blocks=4, hidden_dim=32)
+    model = VLAPolicy(model_cfg, _StubSig(), _StubGemma())
+    stats = Q99Stats(
+        q01=torch.zeros(C.ACTION_DIM), q99=torch.ones(C.ACTION_DIM),
+        mask=torch.ones(C.ACTION_DIM, dtype=torch.bool),
+    )
+    tok = GemmaPromptTokenizer(model_name=None, _tokenizer=_StubTokenizer())
+    image_tx = SiglipImageTransform(size=C.SIGLIP_IMAGE_SIZE, training=False)
+    with pytest.raises(ValueError):
+        XVLAAdapterPolicy(
+            model=model, tokenizer=tok, image_transform=image_tx,
+            norm_stats=stats, action_format="bogus",
+        )
+
+
 def test_compile_mode_invokes_torch_compile(monkeypatch) -> None:
     """compile_mode != 'off' wraps the model via torch.compile."""
     received = {"mode": None, "fullgraph": None}

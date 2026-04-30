@@ -1,0 +1,50 @@
+# Memory + correctness smoke for libero_spatial_ee6d_lora.yaml.
+# Same hyper-params, only max_steps=5 and wandb=false. NOT a learning run.
+seed: 0
+model:
+  num_domains: 1
+  hidden_dim: 1536
+  num_blocks: 35
+  action_dim: 20
+  action_chunk_len: 30
+  loss_type: ee6d
+  use_grad_checkpoint: true
+  lora:
+    r: 64
+    alpha: 128
+    target_modules: [q_proj, v_proj]
+    dropout: 0.0
+vision:
+  model_name: google/siglip-so400m-patch14-224
+language:
+  model_name: google/gemma-4-E2B
+data:
+  type: libero_lerobot_real
+  repo_id: lerobot/libero_spatial_image
+  stats_path: data/norm_stats/libero_spatial.json
+  unnorm_key: libero_spatial_no_noops
+  fps: 10
+  download_videos: false
+  domain_id: 0
+  last_action_chunk_mode: real
+  action_format: ee6d
+  action_chunk_len: 30
+  anchor_window_s: 4.0
+  episodes: [0, 1, 2, 3, 4, 5, 6, 7]   # tiny slice
+train:
+  batch_size: 8
+  lr: 1.0e-4
+  weight_decay: 0.01
+  max_steps: 5
+  freeze_steps: 1
+  warmup_steps: 1
+  min_lr_ratio: 1.0
+  lr_coefs:
+    gemma_lora:     0.1
+    siglip:         0.1
+    soft_prompts:   0.1
+    action_queries: 1.0
+    projections:    1.0
+    action_head:    1.0
+wandb:
+  enabled: false
