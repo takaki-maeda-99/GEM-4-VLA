@@ -5,6 +5,7 @@ Single-GPU `python scripts/train.py ...` and multi-GPU `accelerate launch
 constructor reads env vars set by `accelerate launch`; in single-process
 mode it is a near-no-op.
 """
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
@@ -98,6 +99,11 @@ class Trainer:
 
         losses: List[float] = []
         step = 0
+        last_t = time.perf_counter()
+        # Exponential moving average of step time for ETA (smooths out the
+        # first JIT-warmed steps and noisy data-loading spikes).
+        ema_step_s: Optional[float] = None
+        ema_alpha = 0.1
         while step < self.cfg.max_steps:
             for batch in dataloader:
                 cast_batch = {}
@@ -125,12 +131,29 @@ class Trainer:
                 losses.append(loss_val)
 
                 step += 1
+                now = time.perf_counter()
+                step_time_s = now - last_t
+                last_t = now
+                ema_step_s = (
+                    step_time_s if ema_step_s is None
+                    else ema_alpha * step_time_s + (1 - ema_alpha) * ema_step_s
+                )
+                eta_s = ema_step_s * max(0, self.cfg.max_steps - step)
+                progress_pct = 100.0 * step / max(1, self.cfg.max_steps)
                 # accelerator.log() is a no-op when no tracker was registered
                 # (e.g., default Accelerator()); when log_with='wandb' was set
                 # at construction, this routes to wandb.log(..., step=step).
                 # Logged after step += 1 so the first call is step=1.
                 if hasattr(self.accelerator, "log"):
-                    self.accelerator.log({"train/loss": loss_val}, step=step)
+                    self.accelerator.log(
+                        {
+                            "train/loss":         loss_val,
+                            "train/step_time_ms": step_time_s * 1000.0,
+                            "train/progress_pct": progress_pct,
+                            "train/eta_s":        eta_s,
+                        },
+                        step=step,
+                    )
 
                 # Periodic save (only when both save_every and save_dir set).
                 if (
