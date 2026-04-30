@@ -1,0 +1,108 @@
+%% X-VLA-Adapter architecture (Gemma4-E2B + SigLIP + VLA-Adapter action head)
+%% Status: design agreed (Pro variant, 35-block stack, L1 default + Huber ablation)
+%% Conventions:
+%%   - Hidden size H = 1536 (Gemma4 E2B text_config.hidden_size)
+%%   - PLE dim = 256, num_hidden_layers = 35 (G3: hidden_size_per_layer_input)
+%%   - Ks = 32 (soft prompt length)
+%%   - Nw = 256 (wrist patch tokens, SigLIP raw)
+%%   - T  = 8  (action chunk length, LIBERO default)
+%%   - Da = 7  (action dim), Dp = 8 (proprio dim)
+%%   - Action head: 35 x MLPResNetBlock_Pro, each block i consumes layer i+1
+%%   - Per-block learnable gate: ratio_g_i = tanh(gate_i), init 0,
+%%       gates the task-token (h_t) attention score only.
+%%       self-attn and adapter (h_a + p) are not gated.
+%%   - Loss: L1 default, Huber(beta=0.1) ablation switchable via config
+flowchart TB
+    %% =========================================================
+    %% 1. Batch from X-VLA-style multi-domain dataloader
+    %% =========================================================
+    subgraph BATCH[Batch from X-VLA-style Dataloader]
+        DI[domain_id: B]
+        SI[scene_img: B,3,224,224]
+        WI[wrist_img: B,3,224,224]
+        TX[prompt text]
+        PR[proprio: B,Dp]
+        LA[last_action_chunk: B,T,Da]
+        AT[target action: B,T,Da]
+    end
+
+    %% =========================================================
+    %% 2. SigLIP shared encoder (scene + wrist)
+    %% =========================================================
+    subgraph SIGLIP[SigLIP shared]
+        SI --> SCN[scene patches: B,256,1152]
+        WI --> WRN[wrist patches: B,Nw,1152]
+    end
+
+    %% =========================================================
+    %% 3. Domain-aware modules (X-VLA DomainAwareLinear / Embedding)
+    %% =========================================================
+    subgraph DA[Domain-Aware Modules X-VLA style]
+        DI -. id .-> SP_HUB[(SoftPrompt Hub<br/>nn.Embedding<br/>num_dom x Ks x 1536)]
+        DI -. id .-> SCN_PROJ[Scene Proj<br/>DomainAwareLinear 1152 to 1536]
+        DI -. id .-> WRN_PROJ[Wrist Proj<br/>DomainAwareLinear 1152 to 1536]
+        DI -. id .-> PROP_PROJ[Proprio Proj<br/>DomainAwareLinear Dp to 1536]
+        DI -. id .-> LACT_PROJ[LastAction Proj<br/>DomainAwareLinear Da to 1536]
+        DI -. id .-> AQ_HUB[(ActionQuery Hub<br/>nn.Embedding<br/>num_dom x 64 x 1536)]
+        DI -. id .-> ADEC[Action Decoder<br/>DomainAwareLinear 1536 to Da]
+    end
+
+    SP_HUB --> SP_E[soft prompt: B,Ks,1536]
+    SCN --> SCN_PROJ --> SCN_E[scene embeds: B,256,1536]
+    WRN --> WRN_PROJ --> WRN_E[wrist embeds: B,Nw,1536]
+    AQ_HUB --> AQ_E[action queries: B,64,1536]
+    PR --> PROP_PROJ --> PROP_E[proprio embed: B,1,1536]
+    LA --> LACT_PROJ --> LACT_E[last action: B,T,1536]
+
+    %% =========================================================
+    %% 4. input_ids construction (PaliGemma-style placeholders)
+    %%    NOTE: Proprio is NOT in input_ids. It feeds the action head only.
+    %% =========================================================
+    subgraph IDS["input_ids (LLM-side, no proprio here)"]
+        IDX["BOS<br/>+ SoftPrompt placeholder x Ks  unusedA<br/>+ Scene placeholder x 256  image_soft_token<br/>+ prompt text ids<br/>+ Wrist placeholder x Nw  unusedB<br/>+ ActionQuery placeholder x 64  unusedC<br/>+ EOS"]
+    end
+
+    %% =========================================================
+    %% 5. Gemma4 dual input: PLE (from input_ids) + inputs_embeds (clone+overwrite)
+    %% =========================================================
+    IDX --> PLE[get_per_layer_inputs<br/>B,L,35,256<br/>no_grad]
+    IDX --> EMB_T[embed_tokens<br/>B,L,1536]
+    EMB_T --> CLONE[clone and overwrite<br/>at placeholder positions]
+
+    SP_E --> CLONE
+    SCN_E --> CLONE
+    WRN_E --> CLONE
+    AQ_E --> CLONE
+
+    CLONE --> EMBS[inputs_embeds: B,L,1536]
+
+    %% =========================================================
+    %% 6. Gemma4 E2B forward
+    %% =========================================================
+    EMBS --> GEMMA[Gemma4 E2B<br/>35 layers<br/>output_hidden_states=True<br/>causal attention]
+    PLE --> GEMMA
+    GEMMA --> HID[hidden_states<br/>36,B,L,1536<br/>tap all 35 transformer layers<br/>indices 1..35]
+
+    %% =========================================================
+    %% 7. Per-layer slicing for action head conditioning
+    %% =========================================================
+    HID --> H_T[h_t i for i in 1..35<br/>scene + wrist + text positions<br/>= task tokens]
+    HID --> H_A[h_a i for i in 1..35<br/>ActionQuery positions]
+
+    %% =========================================================
+    %% 8. Action Head (VLA-Adapter MLPResNetBlock_Pro stack)
+    %%    35 blocks - one per transformer layer (block i takes layer i+1)
+    %%    x is init by LastAction only. Proprio enters as p (no fuse).
+    %% =========================================================
+    subgraph HEAD[VLA-Adapter Action Head]
+        LACT_E --> X0[init x: B,T,1536<br/>= LastAction Proj only]
+        X0 --> BLK["35 x MLPResNetBlock_Pro<br/>per block i, softmax over:<br/>• self-attn(x)                     weight 1<br/>• cross-attn(x, h_a[i+1] ⊕ p)      weight 1<br/>• cross-attn(x, h_t[i+1])          weight ratio_g_i<br/>where ratio_g_i = tanh(gate_i), init 0<br/>residual + FFN, per-block RoPE"]
+        H_T --> BLK
+        H_A --> BLK
+        PROP_E -. p .-> BLK
+        BLK --> ADEC
+    end
+
+    ADEC --> PRED[predicted action: B,T,Da]
+    AT --> LOSS[L1 Loss<br/>Huber as ablation]
+    PRED --> LOSS
