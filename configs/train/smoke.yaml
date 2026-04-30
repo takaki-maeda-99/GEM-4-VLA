@@ -9,6 +9,7 @@ vision:
 language:
   model_name: google/gemma-4-E2B
 data:
+  type: libero_synthetic
   length: 16
 train:
   batch_size: 1

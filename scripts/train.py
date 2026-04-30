@@ -1,7 +1,4 @@
 """Thin training entrypoint. Heavy lifting lives in vla_project.training.trainer."""
-from pathlib import Path
-from typing import Iterable
-
 import torch
 from omegaconf import DictConfig, OmegaConf
 from torch.utils.data import DataLoader
