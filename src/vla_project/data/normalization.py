@@ -19,3 +19,73 @@ def normalize(x: torch.Tensor, stats: NormalizationStats) -> torch.Tensor:
 
 def denormalize(x: torch.Tensor, stats: NormalizationStats) -> torch.Tensor:
     return x * _safe_std(stats.std) + stats.mean
+
+
+import json
+from pathlib import Path
+from typing import Union
+
+
+@dataclass
+class Q99Stats:
+    """Per-dim BOUNDS_Q99 stats for action normalization (X-VLA / OpenVLA convention).
+
+    For dims where ``mask[i] == True``, the dim is rescaled to [-1, 1] using
+    q01 / q99. Where ``mask[i] == False`` (typically the binary gripper), the
+    value is passed through unchanged.
+    """
+
+    q01: torch.Tensor   # [A]
+    q99: torch.Tensor   # [A]
+    mask: torch.Tensor  # [A] bool
+
+
+def load_q99_stats(path: Union[str, Path], unnorm_key: str) -> Q99Stats:
+    """Load BOUNDS_Q99 stats from a `dataset_statistics.json` produced by the
+    OpenVLA / VLA-Adapter pipelines.
+
+    The JSON is keyed by dataset name; each entry has an ``action`` block with
+    ``q01``, ``q99``, and (optionally) ``mask`` lists of length A.
+    """
+    payload = json.loads(Path(path).read_text())
+    if unnorm_key not in payload:
+        raise KeyError(
+            f"unnorm_key {unnorm_key!r} not in {path}; available: {list(payload.keys())}"
+        )
+    action = payload[unnorm_key]["action"]
+    q01 = torch.as_tensor(action["q01"], dtype=torch.float32)
+    q99 = torch.as_tensor(action["q99"], dtype=torch.float32)
+    if "mask" in action:
+        mask = torch.as_tensor(action["mask"], dtype=torch.bool)
+    else:
+        mask = torch.ones_like(q01, dtype=torch.bool)
+    if not (q01.shape == q99.shape == mask.shape):
+        raise ValueError(
+            f"q01/q99/mask shape mismatch: {q01.shape}, {q99.shape}, {mask.shape}"
+        )
+    return Q99Stats(q01=q01, q99=q99, mask=mask)
+
+
+def normalize_action_q99(action_raw: torch.Tensor, stats: Q99Stats) -> torch.Tensor:
+    """Forward BOUNDS_Q99 normalization. Inverse of the eval-time denormalize.
+
+    For ``mask=True`` dims: rescale (q01, q99) -> (-1, 1) and clip.
+    For ``mask=False`` dims: passthrough.
+
+    Args:
+        action_raw: [..., A]
+        stats: Q99Stats with shape [A]
+
+    Returns:
+        Tensor of same shape and dtype as ``action_raw``.
+    """
+    if action_raw.shape[-1] != stats.q01.shape[0]:
+        raise ValueError(
+            f"action last dim {action_raw.shape[-1]} != stats dim {stats.q01.shape[0]}"
+        )
+    q01 = stats.q01.to(action_raw.dtype).to(action_raw.device)
+    q99 = stats.q99.to(action_raw.dtype).to(action_raw.device)
+    mask = stats.mask.to(action_raw.device)
+    denom = (q99 - q01).clamp_min(1e-8)
+    norm = (2.0 * (action_raw - q01) / denom - 1.0).clamp(-1.0, 1.0)
+    return torch.where(mask, norm, action_raw)
