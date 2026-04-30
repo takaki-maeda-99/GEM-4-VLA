@@ -1,0 +1,37 @@
+# EE6D smoke train (Plan 11 part B verification).
+# 50 steps, bs=2, single episode. Goal: confirm the 30-anchor / 20-dim
+# pipeline produces finite losses end-to-end. NOT a learning run.
+seed: 0
+model:
+  num_domains: 1
+  hidden_dim: 1536
+  num_blocks: 35
+  action_dim: 20            # X-VLA EE6D layout
+  action_chunk_len: 30      # 30 anchors over the window
+  use_grad_checkpoint: true
+vision:
+  model_name: google/siglip-so400m-patch14-224
+language:
+  model_name: google/gemma-4-E2B
+data:
+  type: libero_lerobot_real
+  repo_id: lerobot/libero_spatial_image
+  stats_path: data/norm_stats/libero_spatial.json   # not used in ee6d, still loaded
+  unnorm_key: libero_spatial_no_noops
+  fps: 10
+  download_videos: false
+  domain_id: 0
+  last_action_chunk_mode: real
+  action_format: ee6d
+  action_chunk_len: 30
+  anchor_window_s: 4.0
+  episodes: [0, 1, 2]       # tiny slice for smoke
+train:
+  batch_size: 2
+  lr: 1.0e-4
+  weight_decay: 0.01
+  max_steps: 50
+  warmup_steps: 0
+  min_lr_ratio: 1.0
+wandb:
+  enabled: false            # smoke probe, no wandb run

@@ -31,10 +31,13 @@ def _build_dataloader(cfg: DictConfig, prompt_max_len: int, language_model_name:
             fps=cfg.data.fps,
             tokenizer=tok,
             episodes=list(cfg.data.episodes) if cfg.data.get("episodes") else None,
+            action_chunk_len=int(cfg.data.get("action_chunk_len", 8)),
             download_videos=bool(cfg.data.get("download_videos", False)),
             domain_id=int(cfg.data.get("domain_id", 0)),
             max_samples=cfg.data.get("max_samples", None),
             last_action_chunk_mode=str(cfg.data.get("last_action_chunk_mode", "zero")),
+            action_format=str(cfg.data.get("action_format", "native")),
+            anchor_window_s=float(cfg.data.get("anchor_window_s", 0.0)),
         )
         return DataLoader(
             ds, batch_size=cfg.train.batch_size,
@@ -52,10 +55,13 @@ def _build_dataloader(cfg: DictConfig, prompt_max_len: int, language_model_name:
                 fps=src.fps,
                 tokenizer=tok,
                 episodes=list(src.episodes) if src.get("episodes") else None,
+                action_chunk_len=int(src.get("action_chunk_len", 8)),
                 download_videos=bool(cfg.data.get("download_videos", False)),
                 domain_id=int(src.domain_id),
                 max_samples=src.get("max_samples", None),
                 last_action_chunk_mode=str(src.get("last_action_chunk_mode", "zero")),
+                action_format=str(src.get("action_format", "native")),
+                anchor_window_s=float(src.get("anchor_window_s", 0.0)),
             ))
             weights.append(float(src.weight))
         ds = WeightedMultiDataset(children, weights, seed=int(cfg.data.get("seed", 0)))
