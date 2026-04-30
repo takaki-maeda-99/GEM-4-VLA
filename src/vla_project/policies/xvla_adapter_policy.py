@@ -52,13 +52,26 @@ class XVLAAdapterPolicy(BasePolicy):
         *,
         action_chunk_len: int = C.ACTION_CHUNK_LEN,
         domain_id: int = 0,
+        compile_mode: str = "off",
     ) -> None:
         self.model = model
+        if compile_mode != "off":
+            # torch.compile speeds up the chunk-refill forward pass. For
+            # inference at bs=1 with stable shapes, mode='reduce-overhead'
+            # (CUDA graphs) usually wins; 'default' / 'max-autotune' also
+            # valid. fullgraph=False allows graph breaks (Gemma's HF code
+            # has Python control flow that can't always trace whole-graph).
+            #
+            # First call pays a 30-60s JIT compile cost. Multi-episode
+            # rollouts amortize this; single-episode smoke runs see net
+            # slowdown.
+            self.model = torch.compile(self.model, mode=compile_mode, fullgraph=False)
         self.tokenizer = tokenizer
         self.image_transform = image_transform
         self.norm_stats = norm_stats
         self.action_chunk_len = action_chunk_len
         self.domain_id = int(domain_id)
+        self.compile_mode = compile_mode
         self._buffer: Deque[np.ndarray] = deque()
         self._last_chunk_norm: torch.Tensor = torch.zeros(
             action_chunk_len, C.ACTION_DIM, dtype=torch.float32
@@ -75,6 +88,7 @@ class XVLAAdapterPolicy(BasePolicy):
         *,
         action_chunk_len: int = C.ACTION_CHUNK_LEN,
         domain_id: int = 0,
+        compile_mode: str = "off",
     ) -> "XVLAAdapterPolicy":
         meta = load_checkpoint(ckpt_dir, model)
         ns = meta.get("norm_stats")
@@ -95,6 +109,7 @@ class XVLAAdapterPolicy(BasePolicy):
             image_transform=image_transform,
             norm_stats=stats,
             action_chunk_len=action_chunk_len,
+            compile_mode=compile_mode,
             domain_id=domain_id,
         )
 

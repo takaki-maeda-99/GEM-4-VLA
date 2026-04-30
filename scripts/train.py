@@ -70,8 +70,29 @@ def main(cfg_path: str) -> None:
     cfg = OmegaConf.load(cfg_path)
     set_seed(cfg.seed)
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    dtype = torch.bfloat16 if device == "cuda" else torch.float32
+    # Construct Accelerator early so we can read the correct per-rank device.
+    # In single-process mode this is a no-op; under accelerate launch it
+    # reads LOCAL_RANK and resolves to cuda:LOCAL_RANK so FSDP / DDP both
+    # see the model on the expected device.
+    from accelerate import Accelerator
+    wandb_cfg = cfg.get("wandb", {})
+    if wandb_cfg.get("enabled", False):
+        accelerator = Accelerator(log_with="wandb")
+        accelerator.init_trackers(
+            project_name=wandb_cfg.get("project", "vla-project"),
+            config=OmegaConf.to_container(cfg, resolve=True),
+            init_kwargs={
+                "wandb": {
+                    "name": wandb_cfg.get("name"),
+                    "tags": list(wandb_cfg.get("tags", [])) or None,
+                }
+            },
+        )
+        print(f"[train] wandb tracking enabled: project={wandb_cfg.get('project', 'vla-project')!r}")
+    else:
+        accelerator = Accelerator()
+    device = accelerator.device
+    dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
     print(f"[train] device={device} dtype={dtype}")
 
     model_dict = OmegaConf.to_container(cfg.model, resolve=True)
@@ -84,6 +105,21 @@ def main(cfg_path: str) -> None:
         lora=lora_cfg,
     )
     policy = VLAPolicy(policy_cfg, vision, gemma).to(device).to(dtype)
+    compile_mode = str(cfg.train.get("compile_mode", "off"))
+    if compile_mode != "off":
+        # `mode in {"default", "reduce-overhead", "max-autotune"}` per torch
+        # docs. fullgraph=False allows graph breaks (Gemma's HF code path has
+        # Python control flow that can't always be traced into a single graph).
+        #
+        # Empirical 2026-05-01 on dl40 A100 (bs=1, 35 blocks, bf16):
+        #   compile_mode=off            -> 400.4 ms / step
+        #   compile_mode='default'      -> 173.3 ms / step  (2.3x faster)
+        #
+        # !! Known limitation: combining compile_mode with model.use_grad_
+        # checkpoint=true triggers an InductorError (KeyError: 'op39') in the
+        # backward compilation. Set use_grad_checkpoint=false when compiling.
+        print(f"[train] applying torch.compile(mode={compile_mode!r}, fullgraph=False)")
+        policy = torch.compile(policy, mode=compile_mode, fullgraph=False)
 
     dl = _build_dataloader(
         cfg, prompt_max_len=policy_cfg.prompt_max_len,
@@ -94,7 +130,11 @@ def main(cfg_path: str) -> None:
         policy, lr=cfg.train.lr,
         soft_lr_coef=cfg.train.soft_lr_coef, weight_decay=cfg.train.weight_decay,
     )
-    trainer = Trainer(policy, optim, TrainerConfig(max_steps=cfg.train.max_steps))
+    trainer = Trainer(
+        policy, optim,
+        TrainerConfig(max_steps=cfg.train.max_steps),
+        accelerator=accelerator,
+    )
     losses = trainer.fit(dl)
     print(f"[train] losses={losses}")
 

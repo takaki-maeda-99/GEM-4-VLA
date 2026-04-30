@@ -1,0 +1,30 @@
+# Accelerate DeepSpeed ZeRO-2 preset for dl40: 2x A100.
+# ZeRO-2 shards optimizer states + grads (params remain replicated). Lighter
+# than FSDP; useful when AdamW state is the dominant memory cost.
+#
+# REQUIRES: `uv add deepspeed`. DeepSpeed compiles CUDA extensions on first
+# install (~5-10 min). Skip-if-not-installed by design.
+#
+# Pick GPUs at run time via CUDA_VISIBLE_DEVICES.
+compute_environment: LOCAL_MACHINE
+distributed_type: DEEPSPEED
+downcast_bf16: 'no'
+machine_rank: 0
+main_training_function: main
+mixed_precision: bf16
+num_machines: 1
+num_processes: 2
+rdzv_backend: static
+same_network: true
+tpu_env: []
+tpu_use_cluster: false
+tpu_use_sudo: false
+use_cpu: false
+deepspeed_config:
+  deepspeed_multinode_launcher: standard
+  gradient_accumulation_steps: 1
+  gradient_clipping: 1.0
+  offload_optimizer_device: none
+  offload_param_device: none
+  zero3_init_flag: false
+  zero_stage: 2

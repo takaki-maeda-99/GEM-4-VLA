@@ -58,6 +58,7 @@ def main(cfg_path: str) -> None:
         model=model, tokenizer=tok, image_transform=image_tx,
         norm_stats=stats, action_chunk_len=policy_cfg.action_chunk_len,
         domain_id=0,
+        compile_mode=str(cfg.eval.get("compile_mode", "off")),
     )
 
     def _make_robot(task_idx: int) -> LIBEROSimRobot:

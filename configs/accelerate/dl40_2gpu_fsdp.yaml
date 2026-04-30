@@ -1,0 +1,48 @@
+# Accelerate FSDP preset for dl40: 2x A100, FullyShardedDataParallel.
+# Shards parameters + grads + optimizer states across ranks => much lower
+# per-rank VRAM at the cost of cross-rank gather on each forward.
+#
+# !!! KNOWN LIMITATION (2026-05-01) !!!
+# This preset DOES NOT WORK with the current code: MLPResNetBlock_Pro in
+# the action head uses `nn.MultiheadAttention`, which trips FSDP under
+# every sharding strategy (FULL_SHARD / SHARD_GRAD_OP fail with
+# "mat2 must be a matrix, got 1-D tensor"; NO_SHARD fails with
+# "Cannot writeback when the parameter shape changes"). PyTorch's FSDP
+# does not unshard `in_proj_weight` / `out_proj_weight` cleanly because
+# these are aggregated tensors accessed via F.multi_head_attention_forward
+# rather than through the FSDP unshard hook on individual params.
+#
+# Fix path: replace nn.MultiheadAttention with three separate nn.Linear
+# Q/K/V projections + F.scaled_dot_product_attention. Out of scope here.
+# Until then, use the plain DDP preset `dl40_2gpu.yaml` for multi-GPU.
+#
+# Pick GPUs at run time via CUDA_VISIBLE_DEVICES.
+compute_environment: LOCAL_MACHINE
+distributed_type: FSDP
+downcast_bf16: 'no'
+machine_rank: 0
+main_training_function: main
+mixed_precision: bf16
+num_machines: 1
+num_processes: 2
+rdzv_backend: static
+same_network: true
+tpu_env: []
+tpu_use_cluster: false
+tpu_use_sudo: false
+use_cpu: false
+fsdp_config:
+  fsdp_auto_wrap_policy: SIZE_BASED_WRAP
+  fsdp_min_num_params: 1000000
+  # FULL_SHARD is the canonical FSDP strategy (params + grads + opt
+  # sharded). Currently broken on this codebase due to the MHA limitation
+  # documented in the file header. Once that's resolved, this is the
+  # right choice.
+  fsdp_sharding_strategy: FULL_SHARD
+  fsdp_state_dict_type: SHARDED_STATE_DICT
+  fsdp_offload_params: false
+  fsdp_use_orig_params: true
+  fsdp_cpu_ram_efficient_loading: false
+  fsdp_sync_module_states: true
+  fsdp_forward_prefetch: false
+  fsdp_backward_prefetch: BACKWARD_PRE
