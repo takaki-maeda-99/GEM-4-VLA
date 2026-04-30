@@ -69,7 +69,15 @@ def test_trainer_logs_each_step() -> None:
     for i, (payload, step) in enumerate(acc.log_calls, start=1):
         assert "train/loss" in payload
         assert isinstance(payload["train/loss"], float)
+        assert "train/step_time_ms" in payload
+        assert payload["train/step_time_ms"] >= 0.0
+        assert "train/progress_pct" in payload
+        assert payload["train/progress_pct"] == 25.0 * i  # 4 steps -> 25/50/75/100
+        assert "train/eta_s" in payload
+        assert payload["train/eta_s"] >= 0.0
         assert step == i
+    # ETA should reach 0 on the last step (no remaining steps).
+    assert acc.log_calls[-1][0]["train/eta_s"] == 0.0
     assert acc.end_training_calls == 1
 
 

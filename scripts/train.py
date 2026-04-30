@@ -75,8 +75,11 @@ def main(cfg_path: str) -> None:
     # reads LOCAL_RANK and resolves to cuda:LOCAL_RANK so FSDP / DDP both
     # see the model on the expected device.
     from accelerate import Accelerator
+    # wandb is ENABLED by default. Set `wandb.enabled: false` in the config,
+    # or export `WANDB_MODE=disabled` (no run, no files) / `WANDB_MODE=offline`
+    # (local cache only, no server) to opt out for one-off smoke runs.
     wandb_cfg = cfg.get("wandb", {})
-    if wandb_cfg.get("enabled", False):
+    if wandb_cfg.get("enabled", True):
         accelerator = Accelerator(log_with="wandb")
         accelerator.init_trackers(
             project_name=wandb_cfg.get("project", "vla-project"),
