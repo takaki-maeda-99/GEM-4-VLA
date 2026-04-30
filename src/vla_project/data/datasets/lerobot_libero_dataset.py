@@ -64,11 +64,17 @@ class LeRobotLiberoDataset(IterableDataset):
         else:
             offsets = [i / fps for i in range(action_chunk_len)]
         delta = {"action": offsets}
+        # tolerance_s=1e9 disables LeRobot's intra-episode timestamp-sync check
+        # at __init__. The check fires on lerobot/libero_*_image (v2.0->v3.0
+        # converted) because some intra-episode diffs do not equal 1/fps within
+        # the default 1e-4. Stats / training only need the action values; the
+        # tolerance is irrelevant. Same workaround as tools/compute_norm_stats.py.
         self.ds = _LeRobotDatasetCls(
             repo_id,
             delta_timestamps=delta,
             episodes=episodes,
             download_videos=download_videos,
+            tolerance_s=1e9,
         )
         self.action_chunk_len = action_chunk_len
         self.domain_id = int(domain_id)
