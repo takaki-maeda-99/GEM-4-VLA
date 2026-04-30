@@ -131,3 +131,29 @@ def compute_q99_stats(
         q99=torch.from_numpy(q99),
         mask=torch.tensor(mask, dtype=torch.bool),
     )
+
+
+def denormalize_action_q99(action_norm: torch.Tensor, stats: Q99Stats) -> torch.Tensor:
+    """Inverse of ``normalize_action_q99`` for inference / deployment.
+
+    For ``mask=True`` dims: rescale normalized values from [-1, 1] back to
+    [q01, q99] via ``x = ((norm + 1) / 2) * (q99 - q01) + q01``.
+    For ``mask=False`` dims: passthrough.
+
+    Args:
+        action_norm: [..., A] tensor (typically model output).
+        stats: Q99Stats with shape [A].
+
+    Returns:
+        Tensor of same shape and dtype as ``action_norm``.
+    """
+    if action_norm.shape[-1] != stats.q01.shape[0]:
+        raise ValueError(
+            f"action last dim {action_norm.shape[-1]} != stats dim {stats.q01.shape[0]}"
+        )
+    q01 = stats.q01.to(action_norm.dtype).to(action_norm.device)
+    q99 = stats.q99.to(action_norm.dtype).to(action_norm.device)
+    mask = stats.mask.to(action_norm.device)
+    span = q99 - q01
+    raw = (action_norm + 1.0) * 0.5 * span + q01
+    return torch.where(mask, raw, action_norm)
