@@ -26,6 +26,10 @@ class VLAPolicyConfig:
     num_blocks: int = C.NUM_LLM_LAYERS
     num_soft_prompt_tokens: int = C.NUM_SOFT_PROMPT_TOKENS
     num_action_queries: int = C.NUM_ACTION_TOKENS
+    num_scene_tokens: int = C.NUM_SCENE_TOKENS  # NEW
+    num_wrist_tokens: int = C.NUM_WRIST_TOKENS  # NEW (raw from SigLIP)
+    use_wrist_pool: bool = False                # NEW
+    wrist_pool_tokens: int = 49                 # NEW (when use_wrist_pool=True)
     bos_id: int = 2
     eos_id: int = 1
     loss_type: str = "l1"  # or "huber"
@@ -54,16 +58,52 @@ class VLAPolicy(nn.Module):
         self.soft_prompt_hub = SoftPromptHub(cfg.num_domains, cfg.num_soft_prompt_tokens, D)
         self.action_query_hub = ActionQueryHub(cfg.num_action_queries, D)  # shared, not per-domain
 
-        self.input_packer = InputPacker(cfg.bos_id, cfg.eos_id, cfg.prompt_max_len)
+        # Resolve effective wrist token count: pooled value when enabled.
+        effective_num_wrist = (
+            cfg.wrist_pool_tokens if cfg.use_wrist_pool else cfg.num_wrist_tokens
+        )
+        if cfg.use_wrist_pool and effective_num_wrist <= 0:
+            raise ValueError(
+                f"wrist_pool_tokens must be > 0 when use_wrist_pool=True; got {cfg.wrist_pool_tokens}"
+            )
+        self._effective_num_wrist = int(effective_num_wrist)
+
+        self.input_packer = InputPacker(
+            cfg.bos_id, cfg.eos_id, cfg.prompt_max_len,
+            num_soft_prompt_tokens=cfg.num_soft_prompt_tokens,
+            num_scene_tokens=cfg.num_scene_tokens,
+            num_wrist_tokens=effective_num_wrist,
+            num_action_queries=cfg.num_action_queries,
+        )
 
         self.action_head = L1RegressionActionHead(
             hidden_dim=D,
             action_dim=A,
             num_action_chunks=cfg.action_chunk_len,
             num_blocks=cfg.num_blocks,
-            num_task_tokens=C.NUM_SCENE_TOKENS + cfg.prompt_max_len + C.NUM_WRIST_TOKENS,
+            num_task_tokens=cfg.num_scene_tokens + cfg.prompt_max_len + effective_num_wrist,
             use_grad_checkpoint=cfg.use_grad_checkpoint,
         )
+
+    def _pool_wrist(self, wrist_tok: torch.Tensor) -> torch.Tensor:
+        """Adaptive-pool a (B, N, D) sequence by reshaping to a square grid.
+
+        Assumes ``N`` is a perfect square (16x16 = 256 for SigLIP@224 / patch14).
+        Pools to a grid of side sqrt(self._effective_num_wrist) and flattens back.
+        """
+        import math
+        B, N, D = wrist_tok.shape
+        side = int(round(math.sqrt(N)))
+        if side * side != N:
+            raise ValueError(f"wrist token count {N} is not a perfect square")
+        pooled_side = int(round(math.sqrt(self._effective_num_wrist)))
+        if pooled_side * pooled_side != self._effective_num_wrist:
+            raise ValueError(
+                f"wrist_pool_tokens {self._effective_num_wrist} is not a perfect square"
+            )
+        grid = wrist_tok.transpose(1, 2).reshape(B, D, side, side)
+        pooled = torch.nn.functional.adaptive_avg_pool2d(grid, (pooled_side, pooled_side))
+        return pooled.reshape(B, D, pooled_side * pooled_side).transpose(1, 2)
 
     def _build_x(self, last_action: torch.Tensor, domain_id: torch.Tensor) -> torch.Tensor:
         """Project last_action [B, T, A] -> [B, T, A*D] directly via DomainAwareLinear.
@@ -87,6 +127,8 @@ class VLAPolicy(nn.Module):
         # 1. SigLIP encode (shared for both views)
         scene_tok = self.vision_encoder(batch["scene_image"])  # [B, 256, D_vis]
         wrist_tok = self.vision_encoder(batch["wrist_image"])
+        if self.cfg.use_wrist_pool:
+            wrist_tok = self._pool_wrist(wrist_tok)
 
         # 2. Project to LLM dim, per domain
         scene_e = self.scene_proj(scene_tok, domain_id)        # [B, 256, D]
