@@ -5,6 +5,7 @@ from torch.utils.data import DataLoader
 
 from vla_project.data.datasets.libero_dataset import SyntheticLIBEROBatchDataset
 from vla_project.data.datasets.lerobot_libero_dataset import LeRobotLiberoDataset
+from vla_project.data.datasets.weighted_multi_dataset import WeightedMultiDataset
 from vla_project.data.transforms.language import GemmaPromptTokenizer
 from vla_project.models.language.gemma4_wrapper import Gemma4Wrapper
 from vla_project.models.vision.siglip import SigLIPEncoder
@@ -34,6 +35,28 @@ def _build_dataloader(cfg: DictConfig, prompt_max_len: int, language_model_name:
             domain_id=int(cfg.data.get("domain_id", 0)),
             max_samples=cfg.data.get("max_samples", None),
         )
+        return DataLoader(
+            ds, batch_size=cfg.train.batch_size,
+            collate_fn=LeRobotLiberoDataset.collate_fn,
+        )
+    if data_type == "libero_lerobot_multidomain":
+        tok = GemmaPromptTokenizer(model_name=language_model_name, max_len=prompt_max_len)
+        children: list = []
+        weights: list = []
+        for src in cfg.data.sources:
+            children.append(LeRobotLiberoDataset(
+                repo_id=src.repo_id,
+                stats_path=src.stats_path,
+                unnorm_key=src.unnorm_key,
+                fps=src.fps,
+                tokenizer=tok,
+                episodes=list(src.episodes) if src.get("episodes") else None,
+                download_videos=bool(cfg.data.get("download_videos", False)),
+                domain_id=int(src.domain_id),
+                max_samples=src.get("max_samples", None),
+            ))
+            weights.append(float(src.weight))
+        ds = WeightedMultiDataset(children, weights, seed=int(cfg.data.get("seed", 0)))
         return DataLoader(
             ds, batch_size=cfg.train.batch_size,
             collate_fn=LeRobotLiberoDataset.collate_fn,

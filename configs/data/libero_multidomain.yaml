@@ -1,0 +1,20 @@
+type: libero_lerobot_multidomain
+seed: 0
+download_videos: false
+sources:
+  - repo_id: lerobot/libero_spatial_image
+    stats_path: ${oc.env:LIBERO_STATS_PATH_SPATIAL,data/norm_stats/libero_spatial.json}
+    unnorm_key: libero_spatial_no_noops
+    fps: 10
+    episodes: [0]
+    domain_id: 0
+    max_samples: 16
+    weight: 1.0
+  - repo_id: lerobot/libero_goal_image
+    stats_path: ${oc.env:LIBERO_STATS_PATH_GOAL,data/norm_stats/libero_goal.json}
+    unnorm_key: libero_goal_no_noops
+    fps: 10
+    episodes: [0]
+    domain_id: 1
+    max_samples: 16
+    weight: 1.0
