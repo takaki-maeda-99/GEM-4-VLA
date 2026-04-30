@@ -1,0 +1,25 @@
+# 1 task × 1 episode end-to-end smoke. Does NOT load a checkpoint — uses a
+# freshly-initialized model; the goal is to verify the loop, not learning.
+seed: 0
+model:
+  num_domains: 1
+  hidden_dim: 1536
+  num_blocks: 35
+  use_grad_checkpoint: false
+vision:
+  model_name: google/siglip-so400m-patch14-224
+language:
+  model_name: google/gemma-4-E2B
+data:
+  unnorm_key: libero_spatial_no_noops
+  stats_path: ${oc.env:LIBERO_STATS_PATH,data/norm_stats/libero_spatial.json}
+robot:
+  bddl_path_root: /misc/dl00/takaki/vla-gemma-4/LIBERO/libero/libero/bddl_files
+  task_suite: libero_spatial
+  image_size: 224
+  libero_path: ${oc.env:LIBERO_PATH,/misc/dl00/takaki/vla-gemma-4/LIBERO}
+eval:
+  task_idxs: [0]
+  num_episodes_per_task: 1
+  max_steps: 30
+  num_steps_wait: 5

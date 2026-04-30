@@ -16,6 +16,12 @@ dependencies = [
     "lerobot>=0.3.3",
     "huggingface-hub>=0.35.3",
     "peft>=0.19.1",
+    "mujoco>=3.8.0",
+    "robosuite==1.4.1",
+    "bddl>=3.6.0",
+    "easydict>=1.13",
+    "matplotlib>=3.10.9",
+    "gym==0.25.2",
 ]
 
 [project.optional-dependencies]
