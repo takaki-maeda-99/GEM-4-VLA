@@ -72,9 +72,15 @@ def main(cfg_path: str) -> None:
     dtype = torch.bfloat16 if device == "cuda" else torch.float32
     print(f"[train] device={device} dtype={dtype}")
 
-    policy_cfg = VLAPolicyConfig(**cfg.model)
+    model_dict = OmegaConf.to_container(cfg.model, resolve=True)
+    lora_cfg = model_dict.pop("lora", None)
+    policy_cfg = VLAPolicyConfig(**model_dict)
     vision = SigLIPEncoder(model_name=cfg.vision.model_name)
-    gemma = Gemma4Wrapper(model_name=cfg.language.model_name, freeze=True)
+    gemma = Gemma4Wrapper(
+        model_name=cfg.language.model_name,
+        freeze=True,
+        lora=lora_cfg,
+    )
     policy = VLAPolicy(policy_cfg, vision, gemma).to(device).to(dtype)
 
     dl = _build_dataloader(
