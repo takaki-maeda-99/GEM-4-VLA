@@ -29,19 +29,40 @@ class InputPacker(nn.Module):
     No proprio in input_ids — it conditions only the action head.
     """
 
-    def __init__(self, bos_id: int, eos_id: int, prompt_max_len: int) -> None:
+    def __init__(
+        self,
+        bos_id: int,
+        eos_id: int,
+        prompt_max_len: int,
+        num_soft_prompt_tokens: int = C.NUM_SOFT_PROMPT_TOKENS,
+        num_scene_tokens: int = C.NUM_SCENE_TOKENS,
+        num_wrist_tokens: int = C.NUM_WRIST_TOKENS,
+        num_action_queries: int = C.NUM_ACTION_TOKENS,
+    ) -> None:
         super().__init__()
+        if num_soft_prompt_tokens <= 0:
+            raise ValueError(f"num_soft_prompt_tokens must be > 0; got {num_soft_prompt_tokens}")
+        if num_scene_tokens <= 0:
+            raise ValueError(f"num_scene_tokens must be > 0; got {num_scene_tokens}")
+        if num_wrist_tokens <= 0:
+            raise ValueError(f"num_wrist_tokens must be > 0; got {num_wrist_tokens}")
+        if num_action_queries <= 0:
+            raise ValueError(f"num_action_queries must be > 0; got {num_action_queries}")
         self.bos_id = bos_id
         self.eos_id = eos_id
         self.prompt_max_len = prompt_max_len
+        self.num_soft_prompt_tokens = num_soft_prompt_tokens
+        self.num_scene_tokens = num_scene_tokens
+        self.num_wrist_tokens = num_wrist_tokens
+        self.num_action_queries = num_action_queries
 
         soft = torch.arange(C.SOFT_PROMPT_BEGIN_IDX,
-                            C.SOFT_PROMPT_BEGIN_IDX + C.NUM_SOFT_PROMPT_TOKENS)
-        scene = torch.full((C.NUM_SCENE_TOKENS,), C.IMAGE_SOFT_TOKEN_ID, dtype=torch.long)
+                            C.SOFT_PROMPT_BEGIN_IDX + num_soft_prompt_tokens)
+        scene = torch.full((num_scene_tokens,), C.IMAGE_SOFT_TOKEN_ID, dtype=torch.long)
         wrist = torch.arange(C.WRIST_PLACEHOLDER_BEGIN_IDX,
-                             C.WRIST_PLACEHOLDER_BEGIN_IDX + C.NUM_WRIST_TOKENS)
+                             C.WRIST_PLACEHOLDER_BEGIN_IDX + num_wrist_tokens)
         action = torch.arange(C.ACTION_TOKEN_BEGIN_IDX,
-                              C.ACTION_TOKEN_BEGIN_IDX + C.NUM_ACTION_TOKENS)
+                              C.ACTION_TOKEN_BEGIN_IDX + num_action_queries)
         # Cached templates (registered as buffers so they move with .to(device))
         self.register_buffer("_soft", soft, persistent=False)
         self.register_buffer("_scene", scene, persistent=False)

@@ -1,0 +1,30 @@
+seed: 0
+model:
+  num_domains: 1
+  hidden_dim: 1536
+  num_blocks: 35
+  use_grad_checkpoint: true
+  use_wrist_pool: true
+  wrist_pool_tokens: 64
+  loss_type: huber
+  huber_beta: 0.1
+vision:
+  model_name: google/siglip-so400m-patch14-224
+language:
+  model_name: google/gemma-4-E2B
+data:
+  type: libero_lerobot_real
+  repo_id: lerobot/libero_spatial_image
+  stats_path: ${oc.env:LIBERO_STATS_PATH,data/norm_stats/libero_spatial.json}
+  unnorm_key: libero_spatial_no_noops
+  fps: 10
+  episodes: [0]
+  download_videos: false
+  domain_id: 0
+  max_samples: 16
+train:
+  batch_size: 1
+  lr: 1.0e-4
+  soft_lr_coef: 1.0
+  weight_decay: 0.01
+  max_steps: 2
