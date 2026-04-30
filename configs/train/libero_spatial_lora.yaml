@@ -1,0 +1,39 @@
+# LIBERO-Spatial 10k training, Stage 2 (Gemma frozen + LoRA on q_proj/v_proj).
+# Same hyper-params as libero_spatial.yaml; only model.lora block added.
+seed: 0
+model:
+  num_domains: 1
+  hidden_dim: 1536
+  num_blocks: 35
+  use_grad_checkpoint: true
+  lora:
+    r: 8
+    alpha: 16
+    target_modules: [q_proj, v_proj]
+    dropout: 0.0
+vision:
+  model_name: google/siglip-so400m-patch14-224
+language:
+  model_name: google/gemma-4-E2B
+data:
+  type: libero_lerobot_real
+  repo_id: lerobot/libero_spatial_image
+  stats_path: data/norm_stats/libero_spatial.json
+  unnorm_key: libero_spatial_no_noops
+  fps: 10
+  download_videos: false
+  domain_id: 0
+  last_action_chunk_mode: real
+train:
+  batch_size: 8
+  lr: 1.0e-4
+  soft_lr_coef: 1.0
+  weight_decay: 0.01
+  max_steps: 10000
+  save_every: 5000
+  save_dir: outputs/libero_spatial_lora_2026-05-01/checkpoints
+wandb:
+  enabled: true
+  project: vla-project
+  name: libero_spatial_lora_bs8_10k_2026-05-01
+  tags: [libero_spatial, bs8, stage2_lora, real_prior_chunk]
