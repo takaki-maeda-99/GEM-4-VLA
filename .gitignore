@@ -1,0 +1,28 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+outputs/
+checkpoints/
+/data/
+*.egg-info/
+.DS_Store
+
+# ML artifacts
+*.pt
+*.safetensors
+*.ckpt
+wandb/
+mlruns/
+lightning_logs/
+
+# Notebook + coverage
+.ipynb_checkpoints/
+.coverage
+htmlcov/
+
+# Local env files
+.env
+.envrc
