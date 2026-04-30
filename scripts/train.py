@@ -34,6 +34,7 @@ def _build_dataloader(cfg: DictConfig, prompt_max_len: int, language_model_name:
             download_videos=bool(cfg.data.get("download_videos", False)),
             domain_id=int(cfg.data.get("domain_id", 0)),
             max_samples=cfg.data.get("max_samples", None),
+            last_action_chunk_mode=str(cfg.data.get("last_action_chunk_mode", "zero")),
         )
         return DataLoader(
             ds, batch_size=cfg.train.batch_size,
@@ -54,6 +55,7 @@ def _build_dataloader(cfg: DictConfig, prompt_max_len: int, language_model_name:
                 download_videos=bool(cfg.data.get("download_videos", False)),
                 domain_id=int(src.domain_id),
                 max_samples=src.get("max_samples", None),
+                last_action_chunk_mode=str(src.get("last_action_chunk_mode", "zero")),
             ))
             weights.append(float(src.weight))
         ds = WeightedMultiDataset(children, weights, seed=int(cfg.data.get("seed", 0)))

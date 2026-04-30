@@ -46,12 +46,24 @@ class LeRobotLiberoDataset(IterableDataset):
         download_videos: bool = True,
         domain_id: int = 0,
         max_samples: Optional[int] = None,
+        last_action_chunk_mode: str = "zero",
     ) -> None:
         super().__init__()
+        if last_action_chunk_mode not in ("zero", "real"):
+            raise ValueError(
+                f"last_action_chunk_mode must be 'zero' or 'real'; got {last_action_chunk_mode!r}"
+            )
         global _LeRobotDatasetCls
         if _LeRobotDatasetCls is None:
             _LeRobotDatasetCls = _default_lerobot_cls()
-        delta = {"action": [i / fps for i in range(action_chunk_len)]}
+        # When mode='real', request 2H entries spanning [-H, H-1]/fps; first H
+        # are the prior chunk, last H are the target. When 'zero', only request
+        # the future chunk and pad last_action_chunk with zeros.
+        if last_action_chunk_mode == "real":
+            offsets = [(i - action_chunk_len) / fps for i in range(2 * action_chunk_len)]
+        else:
+            offsets = [i / fps for i in range(action_chunk_len)]
+        delta = {"action": offsets}
         self.ds = _LeRobotDatasetCls(
             repo_id,
             delta_timestamps=delta,
@@ -61,6 +73,7 @@ class LeRobotLiberoDataset(IterableDataset):
         self.action_chunk_len = action_chunk_len
         self.domain_id = int(domain_id)
         self.max_samples = max_samples
+        self.last_action_chunk_mode = last_action_chunk_mode
         self.stats: Q99Stats = load_q99_stats(stats_path, unnorm_key)
         self.image_tx = SiglipImageTransform(size=C.SIGLIP_IMAGE_SIZE, training=False)
         self.tokenizer = tokenizer
@@ -94,12 +107,35 @@ class LeRobotLiberoDataset(IterableDataset):
         if proprio.shape != (C.PROPRIO_DIM,):
             raise ValueError(f"proprio shape {tuple(proprio.shape)} != ({C.PROPRIO_DIM},)")
         action_raw = sample["action"].to(torch.float32)
-        if action_raw.shape != (self.action_chunk_len, C.ACTION_DIM):
-            raise ValueError(
-                f"action shape {tuple(action_raw.shape)} != "
-                f"({self.action_chunk_len}, {C.ACTION_DIM})"
-            )
-        target_action = normalize_action_q99(action_raw, self.stats)
+        H = self.action_chunk_len
+        if self.last_action_chunk_mode == "real":
+            expected = (2 * H, C.ACTION_DIM)
+            if action_raw.shape != expected:
+                raise ValueError(
+                    f"action shape {tuple(action_raw.shape)} != {expected} "
+                    f"(real-mode expects 2*H entries)"
+                )
+            past_raw = action_raw[:H]
+            future_raw = action_raw[H:]
+            last_action_chunk = normalize_action_q99(past_raw, self.stats)
+            target_action = normalize_action_q99(future_raw, self.stats)
+            # Zero-pad the past at episode start: LeRobot clamps offsets that
+            # fall before frame 0 to the first action, leaking spurious values.
+            frame_index_t = sample.get("frame_index")
+            if frame_index_t is not None:
+                fi = int(frame_index_t.item()) if torch.is_tensor(frame_index_t) else int(frame_index_t)
+                n_clamped = max(0, H - fi)
+                if n_clamped > 0:
+                    last_action_chunk = last_action_chunk.clone()
+                    last_action_chunk[:n_clamped] = 0.0
+        else:
+            if action_raw.shape != (H, C.ACTION_DIM):
+                raise ValueError(
+                    f"action shape {tuple(action_raw.shape)} != "
+                    f"({H}, {C.ACTION_DIM})"
+                )
+            target_action = normalize_action_q99(action_raw, self.stats)
+            last_action_chunk = torch.zeros(H, C.ACTION_DIM, dtype=torch.float32)
 
         task_idx_t = sample["task_index"]
         task_idx = int(task_idx_t.item()) if torch.is_tensor(task_idx_t) else int(task_idx_t)
@@ -113,11 +149,9 @@ class LeRobotLiberoDataset(IterableDataset):
             "prompt_input_ids": prompt["input_ids"],
             "prompt_attention_mask": prompt["attention_mask"],
             "proprio": proprio,
-            "last_action_chunk": torch.zeros(
-                self.action_chunk_len, C.ACTION_DIM, dtype=torch.float32
-            ),
+            "last_action_chunk": last_action_chunk,
             "target_action": target_action,
-            "action_mask": torch.ones(self.action_chunk_len, dtype=torch.bool),
+            "action_mask": torch.ones(H, dtype=torch.bool),
         }
 
     def __iter__(self) -> Iterator[Dict[str, torch.Tensor]]:
@@ -131,12 +165,17 @@ class LeRobotLiberoDataset(IterableDataset):
         else:
             start, stride = info.id, info.num_workers
         emitted = 0
+        expected_chunk_len = (
+            2 * self.action_chunk_len
+            if self.last_action_chunk_mode == "real"
+            else self.action_chunk_len
+        )
         # Single-pass iteration. Trainer calls iter(dataloader) again to restart.
         for i in range(start, len(self.ds), stride):
             if self.max_samples is not None and emitted >= self.max_samples:
                 return
             sample = self.ds[i]
-            if sample["action"].shape[0] != self.action_chunk_len:
+            if sample["action"].shape[0] != expected_chunk_len:
                 # delta_timestamps near episode end may yield a short chunk; skip.
                 continue
             yield self._sample_to_batch_item(sample)
