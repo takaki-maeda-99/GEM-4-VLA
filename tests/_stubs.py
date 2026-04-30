@@ -12,7 +12,7 @@ class _StubSig(nn.Module):
         self.num_tokens = 256
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return torch.zeros(x.shape[0], self.num_tokens, self.hidden_dim)
+        return torch.zeros(x.shape[0], self.num_tokens, self.hidden_dim, device=x.device, dtype=x.dtype)
 
     def freeze(self):
         pass
@@ -37,7 +37,7 @@ class _StubGemma(nn.Module):
 
     def precompute_ple(self, input_ids: torch.Tensor) -> torch.Tensor:
         B, L = input_ids.shape
-        return torch.zeros(B, L, self.num_layers, 4)
+        return torch.zeros(B, L, self.num_layers, 4, device=input_ids.device)
 
     def forward(
         self,
