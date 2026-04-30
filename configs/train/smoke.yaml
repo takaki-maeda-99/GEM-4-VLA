@@ -3,6 +3,7 @@ model:
   num_domains: 1
   hidden_dim: 1536
   num_blocks: 35
+  use_grad_checkpoint: true
 vision:
   model_name: google/siglip-so400m-patch14-224
 language:

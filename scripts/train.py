@@ -18,10 +18,14 @@ def main(cfg_path: str) -> None:
     cfg = OmegaConf.load(cfg_path)
     set_seed(cfg.seed)
 
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    dtype = torch.bfloat16 if device == "cuda" else torch.float32
+    print(f"[train] device={device} dtype={dtype}")
+
     policy_cfg = VLAPolicyConfig(**cfg.model)
     vision = SigLIPEncoder(model_name=cfg.vision.model_name)
     gemma = Gemma4Wrapper(model_name=cfg.language.model_name, freeze=True)
-    policy = VLAPolicy(policy_cfg, vision, gemma)
+    policy = VLAPolicy(policy_cfg, vision, gemma).to(device).to(dtype)
 
     ds = SyntheticLIBEROBatchDataset(length=cfg.data.length, prompt_max_len=policy_cfg.prompt_max_len)
     dl = DataLoader(ds, batch_size=cfg.train.batch_size, collate_fn=ds.collate_fn)
@@ -31,7 +35,8 @@ def main(cfg_path: str) -> None:
         soft_lr_coef=cfg.train.soft_lr_coef, weight_decay=cfg.train.weight_decay,
     )
     trainer = Trainer(policy, optim, TrainerConfig(max_steps=cfg.train.max_steps))
-    trainer.fit(dl)
+    losses = trainer.fit(dl)
+    print(f"[train] losses={losses}")
 
 
 if __name__ == "__main__":
