@@ -113,7 +113,15 @@ class LIBEROSimRobot(BaseRobot):
         #   "agentview_image"      -> (H, W, 3) uint8 (scene)
         #   "robot0_eye_in_hand_image" -> (H, W, 3) uint8 (wrist)
         #   "robot0_eef_pos" / "robot0_eef_quat" / "robot0_gripper_qpos"
-        # ProprioVec convention: 3 (xyz) + 4 (quat) + 1 (gripper) = 8.
+        # ProprioVec convention (must match LeRobot LIBERO dataset's
+        # observation.state schema, names=['x','y','z','rx','ry','rz','rw',
+        # 'gripper']): 3 (xyz) + 3 (Euler-style rotation) + 2 (gripper qpos)
+        # = 8. The dataset stores rotation NOT as a quaternion despite the
+        # 'rw' name — the values look like Euler-style {roll≈π, pitch≈0,
+        # yaw≈small} for LIBERO's arm-pointing-down configuration, with
+        # 'rw' being a 2nd gripper finger qpos slot.
+        # Verified by inspecting lerobot/libero_spatial_image first samples
+        # (rx≈3.14 for arm-down; values not normalizable as a unit quat).
         scene = np.asarray(raw["agentview_image"], dtype=np.uint8)
         wrist = np.asarray(raw["robot0_eye_in_hand_image"], dtype=np.uint8)
         if scene.shape != (self.image_size, self.image_size, 3):
@@ -126,10 +134,38 @@ class LIBEROSimRobot(BaseRobot):
         # (lines 143-154) so closed-loop obs match the dataset distribution.
         scene = scene[::-1, ::-1, :]
         wrist = wrist[::-1, ::-1, :]
+        # Convert sim's eef_quat (xyzw) to Euler (xyz / roll-pitch-yaw) so
+        # proprio matches the dataset format. LIBERO sim's quat appears as
+        # [x, y, z, w]; scipy.Rotation expects xyzw too. Quaternion q and -q
+        # represent the same rotation; the LeRobot dataset's Euler appears
+        # consistent with the +w hemisphere (e.g. roll = +π for arm-down at
+        # ep start), while LIBERO sim sometimes returns the -w hemisphere
+        # (giving roll = -π for the same physical pose). Canonicalize by
+        # flipping the quat to the +w hemisphere before Euler conversion so
+        # train and eval proprio land in the same Euler chart.
+        from scipy.spatial.transform import Rotation as _R
+        quat_xyzw = np.asarray(raw["robot0_eef_quat"], dtype=np.float32)
+        if quat_xyzw[3] < 0.0:
+            quat_xyzw = -quat_xyzw
+        euler = _R.from_quat(quat_xyzw).as_euler("xyz", degrees=False).astype(np.float32)
+        # The arm-pointing-down configuration (the only one LIBERO-Spatial uses
+        # at episode start) has roll ≈ ±π. scipy's Euler decomposition is on a
+        # rotation boundary here and returns -π for sim's quat while the
+        # LeRobot LIBERO dataset records +π for the same physical pose. Take
+        # absolute value of roll to align both to +π. Pitch/yaw unaffected
+        # (they are well inside [-π/2, π/2]).
+        euler[0] = abs(euler[0])
+        gripper = np.asarray(raw["robot0_gripper_qpos"], dtype=np.float32)
+        if gripper.shape[0] < 2:
+            # Some LIBERO versions report only one finger. Pad with the
+            # negation, matching the symmetric two-finger pattern in dataset.
+            gripper = np.array([gripper[0], -gripper[0]], dtype=np.float32)
+        else:
+            gripper = gripper[:2]
         proprio = np.concatenate([
             np.asarray(raw["robot0_eef_pos"], dtype=np.float32),
-            np.asarray(raw["robot0_eef_quat"], dtype=np.float32),
-            np.asarray(raw["robot0_gripper_qpos"], dtype=np.float32)[:1],
+            euler,
+            gripper,
         ]).astype(np.float32)
         return {
             "scene_image": np.ascontiguousarray(scene),
