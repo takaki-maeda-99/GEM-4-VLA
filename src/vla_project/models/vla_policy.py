@@ -203,12 +203,22 @@ class VLAPolicy(nn.Module):
         h_w = wrist_e                                                # [B, K_wrist, D]
         h_sp = soft_e                                                # [B, K_soft, D]
 
-        # 7. x init = zeros (Phase A Bridge match; see __init__ comment).
+        # 7. x init = zeros (Bridge match) + train-time gaussian noise.
+        # Reference (action_heads.py:14-17, 80-83) adds N(0, 0.02²) noise
+        # to the zero-initialized action positions during Training only.
+        # Implemented in ref as a fresh nn.Parameter per call (not registered),
+        # which is functionally identical to additive iid gaussian noise.
+        # Without it, the action positions go through fc1+LN+ReLU as exact
+        # zeros, and q/k/v projections at action positions get only weak
+        # cross-attn gradient signal in early training (symmetry-breaking
+        # has to come purely from RoPE position offsets).
         A = cfg.action_dim
         D = cfg.hidden_dim
         x_init = torch.zeros(
             B, cfg.action_chunk_len, A * D, device=hs.device, dtype=hs.dtype
         )
+        if self.training:
+            x_init = x_init + 0.02 * torch.randn_like(x_init)
 
         # 8. proprio -> p (matches policy dtype).
         p = self.proprio_proj(batch["proprio"], domain_id).unsqueeze(1)
