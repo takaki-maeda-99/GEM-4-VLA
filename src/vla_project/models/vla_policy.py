@@ -60,11 +60,14 @@ class VLAPolicy(nn.Module):
         self.scene_proj = DomainAwareLinear(cfg.siglip_hidden_dim, D, cfg.num_domains)
         self.wrist_proj = DomainAwareLinear(cfg.siglip_hidden_dim, D, cfg.num_domains)
         self.proprio_proj = DomainAwareLinear(cfg.proprio_dim, D, cfg.num_domains)
-        # NOTE: project last_action [B, T, A] -> [B, T, A*D] directly, so the
-        # action-head MLPResNet's fc1 (input_dim = A*D) sees a non-redundant
-        # representation per timestep. Earlier draft tiled a [B, T, D] vector
-        # along a synthesized A axis, which collapses information.
-        self.last_action_proj = DomainAwareLinear(A, A * D, cfg.num_domains)
+        # Phase A (Bridge form match): action-head input ``x`` is zeros, matching
+        # VLA-Adapter reference (``action_heads.py:71`` ``cond_actions_hidden_states
+        # = torch.zeros(...)``). The previous LastAction-projection of
+        # ``batch["last_action_chunk"]`` was our extension that conflicted with
+        # Bridge dynamics — it gave the action head a strong residual through
+        # ``x`` that the cross-attention to image streams could not compete with.
+        # ``last_action_chunk`` is still produced by the dataset (kept for
+        # potential Phase B reinstatement) but is ignored at the model level.
         self.action_decoder = DomainAwareLinear(D, A, cfg.num_domains)
 
         self.soft_prompt_hub = SoftPromptHub(cfg.num_domains, cfg.num_soft_prompt_tokens, D)
@@ -133,20 +136,6 @@ class VLAPolicy(nn.Module):
         pooled = torch.nn.functional.adaptive_avg_pool2d(grid, (pooled_side, pooled_side))
         return pooled.reshape(B, D, pooled_side * pooled_side).transpose(1, 2)
 
-    def _build_x(self, last_action: torch.Tensor, domain_id: torch.Tensor) -> torch.Tensor:
-        """Project last_action [B, T, A] -> [B, T, A*D] directly via DomainAwareLinear.
-
-        The head's MLPResNet.fc1 expects `A*D` per timestep. We project each
-        timestep independently with the per-domain weight matrix; no tiling
-        and no information collapse along the A axis.
-        """
-        B, T, A = last_action.shape
-        D = self.cfg.hidden_dim
-        flat = last_action.reshape(B * T, A)
-        dom = domain_id.repeat_interleave(T)
-        out = self.last_action_proj(flat, dom)  # [B*T, A*D]
-        return out.view(B, T, A * D)
-
     def forward(self, batch: dict) -> Tuple[torch.Tensor, torch.Tensor]:
         cfg = self.cfg
         domain_id = batch["domain_id"]
@@ -186,23 +175,41 @@ class VLAPolicy(nn.Module):
         )
         hs = out.hidden_states  # [B, layers+1, L, D] in llm_dtype
 
-        # 6. Slice h_t / h_a — keep in llm_dtype (head's Linear weights match
-        # when the policy is cast to bf16; for stub-based fp32 tests, hs is fp32
-        # so this is also fine).
-        task_idx = torch.cat([packed.idx["scene"], packed.idx["prompt"], packed.idx["wrist"]], dim=1)
+        # 6. Slice the per-stream hidden states the action head needs.
+        # Bridge form (``action_heads.py:133-176``) splits LLM hidden states
+        # into four streams:
+        #   - h_a (per-layer, action positions)        cross-attn adapter input
+        #   - h_t (per-layer, scene positions ONLY)    cross-attn task input
+        #   - h_w (final layer, wrist positions)       self-attn pool concat
+        #   - h_sp (final layer, soft prompt positions) self-attn pool concat
+        # The text prompt stays inside the LLM (its influence reaches h_a via
+        # internal LLM attention); we no longer extract it as a separate stream
+        # — that was lumped into h_t in the legacy impl, which has no analog in
+        # the reference.
         bs = torch.arange(B, device=hs.device).view(B, 1, 1)
         layers = torch.arange(hs.shape[1], device=hs.device).view(1, hs.shape[1], 1)
-        h_t = hs[bs, layers, task_idx.unsqueeze(1)]                  # [B, layers+1, K_t, D]
         h_a = hs[bs, layers, packed.idx["action"].unsqueeze(1)]      # [B, layers+1, Q, D]
+        h_t = hs[bs, layers, packed.idx["scene"].unsqueeze(1)]       # [B, layers+1, K_scene, D]
+        final_hs = hs[:, -1]                                          # [B, L, D]
+        bs2 = torch.arange(B, device=hs.device).view(B, 1)
+        h_w = final_hs[bs2, packed.idx["wrist"]]                      # [B, K_wrist, D]
+        h_sp = final_hs[bs2, packed.idx["soft"]]                      # [B, K_soft, D]
 
-        # 7. x init from LastActionProj (matches policy dtype).
-        x_init = self._build_x(batch["last_action_chunk"], domain_id)
+        # 7. x init = zeros (Phase A Bridge match; see __init__ comment).
+        A = cfg.action_dim
+        D = cfg.hidden_dim
+        x_init = torch.zeros(
+            B, cfg.action_chunk_len, A * D, device=hs.device, dtype=hs.dtype
+        )
 
         # 8. proprio -> p (matches policy dtype).
         p = self.proprio_proj(batch["proprio"], domain_id).unsqueeze(1)
 
-        # 9. action head (policy dtype throughout).
-        head_out = self.action_head(x_init, h_a=h_a, h_t=h_t, p=p)   # [B, T, D]
+        # 9. action head (policy dtype throughout). h_w + h_sp join the
+        # self-attn pool (concat to x post-fc1, trimmed back after blocks).
+        head_out = self.action_head(
+            x_init, h_a=h_a, h_t=h_t, p=p, h_w=h_w, h_sp=h_sp,
+        )                                                            # [B, T, D]
 
         # 10. action decoder.
         pred = self.action_decoder(head_out, domain_id)              # [B, T, A]

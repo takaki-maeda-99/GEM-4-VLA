@@ -131,3 +131,77 @@ def test_last_action_chunk_affects_output():
         out_b = head(x_b, h_a=h_a, h_t=h_t, p=p)
     diff = (out_a - out_b).abs().max().item()
     assert diff > 1e-2, f"head ignores last_action_chunk input: max-diff={diff:.2e}"
+
+
+def test_h_w_self_attn_pool_concat_affects_output():
+    """Bridge form must concat ``h_w`` to ``x`` for self-attn pool. Two distinct
+    h_w must produce distinct head outputs even when x/h_a/h_t/p are identical."""
+    torch.manual_seed(0)
+    B, T, D, A = 1, 8, 64, 4
+    K_w = 49
+    num_blocks = 6
+    head = MLPResNet(
+        num_blocks=num_blocks, input_dim=A * D, hidden_dim=D,
+        output_dim=D, action_dim=A,
+    )
+    head.eval()
+    h_a, h_t, p = _fake_inputs(B, T, D, num_blocks=num_blocks, K_a=64, K_t=32)
+    x = torch.zeros(B, T, A * D)
+
+    h_w_a = torch.randn(B, K_w, D, generator=torch.Generator().manual_seed(101)) * 0.5
+    h_w_b = torch.randn(B, K_w, D, generator=torch.Generator().manual_seed(202)) * 0.5
+    with torch.no_grad():
+        out_a = head(x, h_a=h_a, h_t=h_t, p=p, h_w=h_w_a)
+        out_b = head(x, h_a=h_a, h_t=h_t, p=p, h_w=h_w_b)
+    diff = (out_a - out_b).abs().max().item()
+    assert diff > 1e-2, (
+        f"head ignores h_w (self-attn pool): max-diff={diff:.2e}. "
+        "Bridge form requires h_w concat to x post-fc1."
+    )
+    # Trim must restore action_len; output T must equal input action_len.
+    assert out_a.shape == (B, T, D), (
+        f"trim broken: expected (B={B}, T={T}, D={D}), got {tuple(out_a.shape)}"
+    )
+
+
+def test_h_sp_self_attn_pool_concat_affects_output():
+    """Same as above, but for ``h_sp`` (soft prompt stream)."""
+    torch.manual_seed(0)
+    B, T, D, A = 1, 8, 64, 4
+    K_sp = 32
+    num_blocks = 6
+    head = MLPResNet(
+        num_blocks=num_blocks, input_dim=A * D, hidden_dim=D,
+        output_dim=D, action_dim=A,
+    )
+    head.eval()
+    h_a, h_t, p = _fake_inputs(B, T, D, num_blocks=num_blocks, K_a=64, K_t=32)
+    x = torch.zeros(B, T, A * D)
+
+    h_sp_a = torch.randn(B, K_sp, D, generator=torch.Generator().manual_seed(303)) * 0.5
+    h_sp_b = torch.randn(B, K_sp, D, generator=torch.Generator().manual_seed(404)) * 0.5
+    with torch.no_grad():
+        out_a = head(x, h_a=h_a, h_t=h_t, p=p, h_sp=h_sp_a)
+        out_b = head(x, h_a=h_a, h_t=h_t, p=p, h_sp=h_sp_b)
+    diff = (out_a - out_b).abs().max().item()
+    assert diff > 1e-2, (
+        f"head ignores h_sp: max-diff={diff:.2e}. "
+        "Bridge form requires h_sp concat to x post-fc1."
+    )
+
+
+def test_h_w_h_sp_optional_back_compat():
+    """Calling forward without h_w/h_sp must still work (no concat, no trim)."""
+    torch.manual_seed(0)
+    B, T, D, A = 1, 8, 64, 4
+    num_blocks = 4
+    head = MLPResNet(
+        num_blocks=num_blocks, input_dim=A * D, hidden_dim=D,
+        output_dim=D, action_dim=A,
+    )
+    head.eval()
+    h_a, h_t, p = _fake_inputs(B, T, D, num_blocks=num_blocks, K_a=64, K_t=32)
+    x = torch.zeros(B, T, A * D)
+    with torch.no_grad():
+        out = head(x, h_a=h_a, h_t=h_t, p=p)
+    assert out.shape == (B, T, D)

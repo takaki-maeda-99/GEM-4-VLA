@@ -25,7 +25,10 @@ data:
   domain_id: 0
   last_action_chunk_mode: real
 train:
-  batch_size: 8
+  # bs=4 on 40GB GPU after the proper-FFN action head fix; the 4× FFN
+  # expansion (1536→6144) blows past 40GB at bs=8. bs=8 still works on
+  # 80GB; raise PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True there.
+  batch_size: 4
   lr: 1.0e-4
   weight_decay: 0.01
   max_steps: 10000

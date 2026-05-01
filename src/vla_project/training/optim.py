@@ -67,7 +67,6 @@ def build_optimizer(
         list(model.scene_proj.parameters())
         + list(model.wrist_proj.parameters())
         + list(model.proprio_proj.parameters())
-        + list(model.last_action_proj.parameters())
         + list(model.action_decoder.parameters())
     )
 

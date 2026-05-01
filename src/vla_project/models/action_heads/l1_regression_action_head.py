@@ -42,9 +42,11 @@ class L1RegressionActionHead(nn.Module):
 
     def forward(
         self,
-        x: torch.Tensor,            # [B, T, A*D] — LastAction-projected and tiled
-        h_a: torch.Tensor,          # [B, L+1, Q, D]
-        h_t: torch.Tensor,          # [B, L+1, K_t, D]
-        p: torch.Tensor,            # [B, 1, D]
+        x: torch.Tensor,                  # [B, T, A*D]
+        h_a: torch.Tensor,                # [B, L+1, Q, D]
+        h_t: torch.Tensor,                # [B, L+1, K_t, D]
+        p: torch.Tensor,                  # [B, 1, D]
+        h_w=None,                         # [B, K_w, D] (Bridge self-attn pool)
+        h_sp=None,                        # [B, K_sp, D] (Bridge self-attn pool)
     ) -> torch.Tensor:
-        return self.model(x, h_a=h_a, h_t=h_t, p=p)
+        return self.model(x, h_a=h_a, h_t=h_t, p=p, h_w=h_w, h_sp=h_sp)
