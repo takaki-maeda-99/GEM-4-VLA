@@ -65,6 +65,7 @@ class LeRobotLiberoDataset(IterableDataset):
         last_action_chunk_mode: str = "zero",
         action_format: str = "native",
         anchor_window_s: float = 0.0,
+        task_index_filter: Optional[int] = None,
     ) -> None:
         super().__init__()
         if last_action_chunk_mode not in ("zero", "real"):
@@ -126,11 +127,49 @@ class LeRobotLiberoDataset(IterableDataset):
         self.last_action_chunk_mode = last_action_chunk_mode
         self.action_format = action_format
         self.anchor_window_s = float(anchor_window_s)
+        # Optional post-hoc task filter: skip samples whose task_index doesn't
+        # match. Use this when you need a single-task subset and the wrapped
+        # LeRobotDataset's ``episodes=[...]`` filter would mis-reindex (its
+        # ``episode_data_index`` ends up sized to the filter length but
+        # samples retain their ORIGINAL ``episode_index`` values, causing
+        # IndexError on _get_query_indices for non-contiguous filters).
+        self.task_index_filter = (
+            int(task_index_filter) if task_index_filter is not None else None
+        )
         # Q99 stats only used in native mode; EE6D values are pre-bounded.
         self.stats: Q99Stats = load_q99_stats(stats_path, unnorm_key)
         self.image_tx = SiglipImageTransform(size=C.SIGLIP_IMAGE_SIZE, training=False)
         self.tokenizer = tokenizer
         self._task_idx_to_str: Dict[int, str] = self._build_task_map()
+        # Pre-compute the list of valid frame indices when task_index_filter is
+        # set. Iterating the full dataset and skipping at sample-load time is
+        # too slow (every skipped sample still pays full image-decode I/O); we
+        # walk the episode metadata + episode_data_index instead and restrict
+        # iteration to frames that belong to the target task. None means
+        # "iterate all frames", checked in __iter__.
+        self._task_filtered_indices: Optional[List[int]] = None
+        if self.task_index_filter is not None:
+            target_str = self._task_idx_to_str.get(self.task_index_filter)
+            if target_str is None:
+                raise ValueError(
+                    f"task_index_filter={self.task_index_filter} not in "
+                    f"task map (have {sorted(self._task_idx_to_str)})"
+                )
+            ep_meta = self.ds.meta.episodes
+            edi_from = self.ds.episode_data_index["from"]
+            edi_to = self.ds.episode_data_index["to"]
+            valid: List[int] = []
+            for ep_id, info in ep_meta.items():
+                tasks = info.get("tasks", [])
+                if target_str.strip() in {str(t).strip() for t in tasks}:
+                    f, t = int(edi_from[ep_id]), int(edi_to[ep_id])
+                    valid.extend(range(f, t))
+            if not valid:
+                raise ValueError(
+                    f"task_index_filter={self.task_index_filter} ({target_str!r}) "
+                    f"matched 0 episodes; check task index ↔ string mapping"
+                )
+            self._task_filtered_indices = valid
 
     def _build_task_map(self) -> Dict[int, str]:
         out: Dict[int, str] = {}
@@ -262,7 +301,12 @@ class LeRobotLiberoDataset(IterableDataset):
         )
         # Single-pass iteration. Trainer calls iter(dataloader) again to restart.
         chunk_key = "action" if self.action_format == "native" else "observation.state"
-        for i in range(start, len(self.ds), stride):
+        if self._task_filtered_indices is not None:
+            # Pre-computed: only frames whose episode matches task_index_filter.
+            indices = self._task_filtered_indices[start::stride]
+        else:
+            indices = range(start, len(self.ds), stride)
+        for i in indices:
             if self.max_samples is not None and emitted >= self.max_samples:
                 return
             sample = self.ds[i]

@@ -176,24 +176,32 @@ class VLAPolicy(nn.Module):
         hs = out.hidden_states  # [B, layers+1, L, D] in llm_dtype
 
         # 6. Slice the per-stream hidden states the action head needs.
-        # Bridge form (``action_heads.py:133-176``) splits LLM hidden states
-        # into four streams:
-        #   - h_a (per-layer, action positions)        cross-attn adapter input
-        #   - h_t (per-layer, scene positions ONLY)    cross-attn task input
-        #   - h_w (final layer, wrist positions)       self-attn pool concat
-        #   - h_sp (final layer, soft prompt positions) self-attn pool concat
-        # The text prompt stays inside the LLM (its influence reaches h_a via
-        # internal LLM attention); we no longer extract it as a separate stream
-        # — that was lumped into h_t in the legacy impl, which has no analog in
-        # the reference.
+        # Bridge form (``action_heads.py:133-176``) splits inputs into four
+        # streams; semantically:
+        #   - h_a (per-layer, action positions)  cross-attn adapter (LLM-processed)
+        #   - h_t (per-layer, scene positions)   cross-attn task    (LLM-processed)
+        #   - h_w (un-LLM-processed wrist)       self-attn pool concat
+        #   - h_sp (un-LLM-processed soft prompt) self-attn pool concat
+        # The reference deliberately routes wrist + soft prompt OUTSIDE the
+        # LLM (separate ResNet18 wrist encoder + nn.Embedding soft-prompt
+        # library) so the head receives a fresh signal that has not been
+        # laundered through 35 layers of LLM self-attn. We replicate the
+        # semantic by reusing the modules already in this class:
+        #   h_w  = self.wrist_proj(SigLIP(wrist_image))   = ``wrist_e``
+        #   h_sp = self.soft_prompt_hub(domain_id)        = ``soft_e``
+        # Both were already computed for the LLM scatter on lines above, so we
+        # just hold a reference. The wrist/soft tokens still appear in the LLM
+        # input (so language can attend to them), but the head's self-attn
+        # pool concat draws from the pre-LLM source — a faithful Phase A
+        # Bridge match that does not require a separate CNN wrist encoder.
+        # Verified by code review against
+        # vla-gemma-4/.../modeling_prismatic_gemma4.py:541-630.
         bs = torch.arange(B, device=hs.device).view(B, 1, 1)
         layers = torch.arange(hs.shape[1], device=hs.device).view(1, hs.shape[1], 1)
         h_a = hs[bs, layers, packed.idx["action"].unsqueeze(1)]      # [B, layers+1, Q, D]
         h_t = hs[bs, layers, packed.idx["scene"].unsqueeze(1)]       # [B, layers+1, K_scene, D]
-        final_hs = hs[:, -1]                                          # [B, L, D]
-        bs2 = torch.arange(B, device=hs.device).view(B, 1)
-        h_w = final_hs[bs2, packed.idx["wrist"]]                      # [B, K_wrist, D]
-        h_sp = final_hs[bs2, packed.idx["soft"]]                      # [B, K_soft, D]
+        h_w = wrist_e                                                # [B, K_wrist, D]
+        h_sp = soft_e                                                # [B, K_soft, D]
 
         # 7. x init = zeros (Phase A Bridge match; see __init__ comment).
         A = cfg.action_dim

@@ -38,6 +38,7 @@ def _build_dataloader(cfg: DictConfig, prompt_max_len: int, language_model_name:
             last_action_chunk_mode=str(cfg.data.get("last_action_chunk_mode", "zero")),
             action_format=str(cfg.data.get("action_format", "native")),
             anchor_window_s=float(cfg.data.get("anchor_window_s", 0.0)),
+            task_index_filter=cfg.data.get("task_index_filter", None),
         )
         return DataLoader(
             ds, batch_size=cfg.train.batch_size,
@@ -151,6 +152,7 @@ def main(cfg_path: str) -> None:
         warmup_steps=int(cfg.train.get("warmup_steps", 0)),
         min_lr_ratio=float(cfg.train.get("min_lr_ratio", 1.0)),
         freeze_steps=int(cfg.train.get("freeze_steps", 0)),
+        grad_clip_norm=float(cfg.train.get("grad_clip_norm", 1.0)),
     )
     trainer = Trainer(policy, optim, trainer_cfg, accelerator=accelerator)
     losses = trainer.fit(dl)
