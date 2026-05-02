@@ -103,14 +103,30 @@ class LIBEROSimRobot(BaseRobot):
         self._env.seed(self.seed)
         # Load this task's standard LIBERO init_states. Match the upstream
         # eval protocol so each rollout uses an in-distribution scene.
+        # libero's ``get_task_init_states`` calls ``torch.load`` without
+        # ``weights_only=False``; on PyTorch ≥ 2.6 this fails with
+        # "Unsupported global numpy.core.multiarray._reconstruct" because
+        # the init_states file contains pickled numpy arrays. Bypass
+        # libero's loader and read the file directly.
         try:
+            import os as _os
+            import torch as _torch
             from libero.libero import benchmark as _libero_benchmark  # type: ignore
+            from libero.libero import get_libero_path as _get_libero_path  # type: ignore
             benchmark_dict = _libero_benchmark.get_benchmark_dict()
             task_suite_obj = benchmark_dict[self.task_suite]()
-            self._libero_init_states = task_suite_obj.get_task_init_states(self.task_idx)
+            task_obj = task_suite_obj.tasks[self.task_idx]
+            init_states_path = _os.path.join(
+                _get_libero_path("init_states"),
+                task_obj.problem_folder,
+                task_obj.init_states_file,
+            )
+            self._libero_init_states = _torch.load(
+                init_states_path, weights_only=False
+            )
         except Exception as e:
-            # If init_states aren't available (older libero), fall back to
-            # plain env.reset() — random scene, eval matches will fail.
+            # If init_states aren't available (older libero or path issue),
+            # fall back to plain env.reset() — random scene.
             print(f"[LIBEROSimRobot] init_states load failed: {e!r}; using random reset")
             self._libero_init_states = None
 
