@@ -59,6 +59,12 @@ class VLAPolicyConfig:
     # model can still suppress unhelpful streams via the k_task / k_wrist
     # projection weights.
     ungated_streams: bool = False
+    # ``use_soft_prompt=False`` skips the soft_prompt_hub allocation and
+    # passes h_sp=None to the action head. The 73% vla-gemma-4 baseline
+    # (libero finetune) ran with ``num_pretrain_datasets=0`` so its
+    # soft_prompt_library was None and h_sp was never built. Default True
+    # for backwards compat with multi-domain configs that need it.
+    use_soft_prompt: bool = True
     bos_id: int = 2
     eos_id: int = 1
     loss_type: str = "l1"  # or "huber" or "ee6d"
@@ -92,7 +98,10 @@ class VLAPolicy(nn.Module):
         # potential Phase B reinstatement) but is ignored at the model level.
         self.action_decoder = DomainAwareLinear(D, A, cfg.num_domains)
 
-        self.soft_prompt_hub = SoftPromptHub(cfg.num_domains, cfg.num_soft_prompt_tokens, D)
+        if cfg.use_soft_prompt:
+            self.soft_prompt_hub = SoftPromptHub(cfg.num_domains, cfg.num_soft_prompt_tokens, D)
+        else:
+            self.soft_prompt_hub = None
         self.action_query_hub = ActionQueryHub(cfg.num_action_queries, D)  # shared, not per-domain
 
         # Resolve effective wrist token count: pooled value when enabled.
@@ -217,7 +226,7 @@ class VLAPolicy(nn.Module):
             h_w_bridge = self.wrist_projector_bridge(wrist_layers)  # [B, ..., 256, D]
 
         # 3. Soft prompts (per-domain) and action queries (shared, broadcast)
-        soft_e = self.soft_prompt_hub(domain_id)
+        soft_e = self.soft_prompt_hub(domain_id) if self.soft_prompt_hub is not None else None
         action_q_e = self.action_query_hub(B)
 
         # 4. Build input_ids + indices
@@ -267,7 +276,7 @@ class VLAPolicy(nn.Module):
         h_a = hs[bs, layers, packed.idx["action"].unsqueeze(1)]      # [B, layers+1, Q, D]
         h_t = hs[bs, layers, packed.idx["scene"].unsqueeze(1)]       # [B, layers+1, K_scene, D]
         h_w = wrist_e                                                # [B, K_wrist, D]
-        h_sp = soft_e                                                # [B, K_soft, D]
+        h_sp = soft_e                                                # [B, K_soft, D] or None
 
         # 7. x init = zeros (Bridge match) + train-time gaussian noise.
         # Reference (action_heads.py:14-17, 80-83) adds N(0, 0.02²) noise

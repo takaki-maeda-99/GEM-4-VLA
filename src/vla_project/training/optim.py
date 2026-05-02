@@ -60,7 +60,9 @@ def build_optimizer(
 
     gemma_lora    = _trainable(model.gemma.parameters())
     siglip        = _trainable(model.vision_encoder.parameters())
-    soft          = _trainable(model.soft_prompt_hub.parameters())
+    soft          = _trainable(
+        model.soft_prompt_hub.parameters() if model.soft_prompt_hub is not None else []
+    )
     aq            = _trainable(model.action_query_hub.parameters())
     head          = _trainable(model.action_head.parameters())
     proj_params = (
