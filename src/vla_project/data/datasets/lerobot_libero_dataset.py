@@ -31,7 +31,13 @@ import torch
 from torch.utils.data import IterableDataset
 
 from vla_project.data import constants as C
-from vla_project.data.normalization import Q99Stats, load_q99_stats, normalize_action_q99
+from vla_project.data.normalization import (
+    Q99Stats,
+    load_q99_proprio_stats,
+    load_q99_stats,
+    normalize_action_q99,
+    normalize_proprio_q99,
+)
 from vla_project.data.transforms.action_alignment import (
     anchor_offsets,
     ee_pose_to_action20,
@@ -138,6 +144,16 @@ class LeRobotLiberoDataset(IterableDataset):
         )
         # Q99 stats only used in native mode; EE6D values are pre-bounded.
         self.stats: Q99Stats = load_q99_stats(stats_path, unnorm_key)
+        # Optional proprio stats: 73% vla-gemma-4 baseline trained with RLDS-
+        # auto-normalized proprio (BOUNDS_Q99). Without normalization the
+        # proprio_proj DA-Linear sees axis-angle/m units (z≈0.92-1.29, rx≈
+        # 2.78-3.28) that are far from the LLM embedding scale. Returns None
+        # when the stats file lacks a proprio block, preserving raw behavior
+        # for older configs / smoke tests; new datasets should ship with
+        # proprio q01/q99/mask alongside the action block.
+        self.proprio_stats: Optional[Q99Stats] = load_q99_proprio_stats(
+            stats_path, unnorm_key
+        )
         self.image_tx = SiglipImageTransform(size=C.SIGLIP_IMAGE_SIZE, training=False)
         self.tokenizer = tokenizer
         self._task_idx_to_str: Dict[int, str] = self._build_task_map()
@@ -271,6 +287,8 @@ class LeRobotLiberoDataset(IterableDataset):
         prompt_text = self._task_idx_to_str.get(task_idx, "")
         prompt = self.tokenizer(prompt_text)
 
+        if self.proprio_stats is not None:
+            proprio = normalize_proprio_q99(proprio, self.proprio_stats)
         return {
             "domain_id": torch.tensor(self.domain_id, dtype=torch.long),
             "scene_image": scene,

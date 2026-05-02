@@ -39,7 +39,9 @@ from vla_project.data import constants as C
 from vla_project.data.normalization import (
     Q99Stats,
     denormalize_action_q99,
+    load_q99_proprio_stats,
     load_q99_stats,
+    normalize_proprio_q99,
 )
 from vla_project.data.transforms.action_alignment import action20_to_ee_delta
 from vla_project.data.transforms.image import SiglipImageTransform
@@ -61,6 +63,7 @@ class XVLAAdapterPolicy(BasePolicy):
         domain_id: int = 0,
         compile_mode: str = "off",
         action_format: str = "native",
+        proprio_stats: Optional[Q99Stats] = None,
     ) -> None:
         if action_format not in ("native", "ee6d"):
             raise ValueError(
@@ -81,6 +84,12 @@ class XVLAAdapterPolicy(BasePolicy):
         self.tokenizer = tokenizer
         self.image_transform = image_transform
         self.norm_stats = norm_stats
+        # Proprio normalization (BOUNDS_Q99). When provided, applied at
+        # ``_build_batch`` so the model sees the same normalized proprio
+        # the dataset fed during training. Mirrors vla-gemma-4
+        # ``vla_evaluation.normalize_proprio`` (RLDS-auto-normalized at train
+        # time + explicit normalize at eval time).
+        self.proprio_stats = proprio_stats
         self.action_chunk_len = action_chunk_len
         self.domain_id = int(domain_id)
         self.compile_mode = compile_mode
@@ -176,7 +185,10 @@ class XVLAAdapterPolicy(BasePolicy):
         model_dtype = first_param.dtype
         scene = self._np_image_to_chw(obs["scene_image"]).unsqueeze(0).to(device).to(model_dtype)
         wrist = self._np_image_to_chw(obs["wrist_image"]).unsqueeze(0).to(device).to(model_dtype)
-        proprio = torch.from_numpy(np.asarray(obs["proprio"], dtype=np.float32)).unsqueeze(0).to(device).to(model_dtype)
+        proprio = torch.from_numpy(np.asarray(obs["proprio"], dtype=np.float32))
+        if self.proprio_stats is not None:
+            proprio = normalize_proprio_q99(proprio, self.proprio_stats)
+        proprio = proprio.unsqueeze(0).to(device).to(model_dtype)
         prompt = self.tokenizer(obs["language"])
         action_dim_internal = 20 if self.action_format == "ee6d" else C.ACTION_DIM
         return {

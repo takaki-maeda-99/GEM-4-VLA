@@ -13,7 +13,7 @@ import torch
 from omegaconf import OmegaConf
 
 from vla_project.data import constants as C
-from vla_project.data.normalization import load_q99_stats
+from vla_project.data.normalization import load_q99_proprio_stats, load_q99_stats
 from vla_project.data.transforms.image import SiglipImageTransform
 from vla_project.data.transforms.language import GemmaPromptTokenizer
 from vla_project.evaluation.libero_eval import evaluate_libero
@@ -49,6 +49,7 @@ def main(cfg_path: str) -> None:
         print(f"[eval] loaded checkpoint step={meta.get('step')!r}")
 
     stats = load_q99_stats(cfg.data.stats_path, cfg.data.unnorm_key)
+    proprio_stats = load_q99_proprio_stats(cfg.data.stats_path, cfg.data.unnorm_key)
     tok = GemmaPromptTokenizer(
         model_name=cfg.language.model_name, max_len=policy_cfg.prompt_max_len
     )
@@ -60,6 +61,7 @@ def main(cfg_path: str) -> None:
         domain_id=0,
         compile_mode=str(cfg.eval.get("compile_mode", "off")),
         action_format=str(cfg.data.get("action_format", "native")),
+        proprio_stats=proprio_stats,
     )
 
     def _make_robot(task_idx: int) -> LIBEROSimRobot:
