@@ -22,6 +22,8 @@ class L1RegressionActionHead(nn.Module):
         num_task_tokens: int,
         use_grad_checkpoint: bool = False,
         use_wrist_bridge: bool = False,
+        gating_init: float = 0.0,
+        gating_init_wrist: float = 0.0,
     ) -> None:
         super().__init__()
         self.hidden_dim = hidden_dim
@@ -41,6 +43,8 @@ class L1RegressionActionHead(nn.Module):
             action_dim=action_dim,
             use_grad_checkpoint=use_grad_checkpoint,
             use_wrist_bridge=use_wrist_bridge,
+            gating_init=gating_init,
+            gating_init_wrist=gating_init_wrist,
         )
 
     def forward(

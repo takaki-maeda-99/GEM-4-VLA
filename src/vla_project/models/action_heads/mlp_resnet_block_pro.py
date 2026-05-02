@@ -25,7 +25,14 @@ class MLPResNetBlock_Pro(nn.Module):
     35-layer all-tap). Use this legacy variant with ``num_blocks=24``.
     """
 
-    def __init__(self, dim: int, num_heads: int = 8, use_wrist_bridge: bool = False) -> None:
+    def __init__(
+        self,
+        dim: int,
+        num_heads: int = 8,
+        use_wrist_bridge: bool = False,
+        gating_init: float = 0.0,
+        gating_init_wrist: float = 0.0,
+    ) -> None:
         super().__init__()
         assert dim % num_heads == 0
         self.dim = dim
@@ -48,18 +55,26 @@ class MLPResNetBlock_Pro(nn.Module):
             nn.ReLU(),
         )
 
-        self.gating_factor = nn.Parameter(torch.zeros(1))
+        # gating_factor controls task cross-attn (h_t) ratio via tanh(g).
+        # Default 0 init matches the reference; gating_init>0 bootstraps the
+        # task stream so the action head sees scene-derived h_t from step 1
+        # instead of waiting for tanh(0) ramp.
+        # 2026-05-03 finding: with bs=8 (vs reference's effective bs=32 from
+        # 2-GPU DDP), the gating ramp is ~4x slower. Diagnostic at v9
+        # step_2500 showed gating still at ~0.001 after 2500 steps, with
+        # the action head outputting constant predictions across obs/time.
+        # Warm-starting the gating gives immediate cross-attn signal so
+        # the head can learn to depend on h_t / h_w_bridge from the start.
+        self.gating_factor = nn.Parameter(torch.tensor([float(gating_init)]))
         self.rope = RotaryEmbedding(dim=self.head_dim)
 
         # Wrist bridge cross-attn (4th attn branch, vla-gemma-4 #015 option B).
         # Only allocated when ``use_wrist_bridge=True`` so legacy ckpts (no
         # k_wrist / v_wrist params) can still load by setting the flag False.
-        # ``gating_factor_wrist`` tanh-init at zero so wrist contribution
-        # ramps in gradually during training (warmup-equivalent).
         if use_wrist_bridge:
             self.k_wrist = nn.Linear(dim, dim)
             self.v_wrist = nn.Linear(dim, dim)
-            self.gating_factor_wrist = nn.Parameter(torch.zeros(1))
+            self.gating_factor_wrist = nn.Parameter(torch.tensor([float(gating_init_wrist)]))
 
     def forward(
         self,

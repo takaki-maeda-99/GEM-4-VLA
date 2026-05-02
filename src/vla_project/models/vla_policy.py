@@ -44,6 +44,12 @@ class VLAPolicyConfig:
     # key fix for v6's constant-prediction collapse (frozen LLM + tiny LoRA
     # couldn't push enough obs info into action positions).
     use_wrist_bridge: bool = False
+    # Warm-init gating factors (atanh-space). 0 → tanh(0)=0 cold start;
+    # ~0.55 → tanh≈0.5 immediate cross-attn contribution; 1.0 → tanh≈0.76.
+    # Default 0 matches reference; use >0 for our smaller-bs runs to avoid
+    # the ramp-too-slow collapse observed in v6/v9-step_2500 diagnostics.
+    gating_init: float = 0.0
+    gating_init_wrist: float = 0.0
     bos_id: int = 2
     eos_id: int = 1
     loss_type: str = "l1"  # or "huber" or "ee6d"
@@ -114,6 +120,8 @@ class VLAPolicy(nn.Module):
             num_task_tokens=cfg.num_scene_tokens,
             use_grad_checkpoint=cfg.use_grad_checkpoint,
             use_wrist_bridge=cfg.use_wrist_bridge,
+            gating_init=cfg.gating_init,
+            gating_init_wrist=cfg.gating_init_wrist,
         )
 
         # Wrist bridge projector: single Linear(siglip_dim → llm_dim) shared

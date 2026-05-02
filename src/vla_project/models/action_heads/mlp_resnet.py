@@ -17,6 +17,8 @@ class MLPResNet(nn.Module):
         action_dim: int,
         use_grad_checkpoint: bool = False,
         use_wrist_bridge: bool = False,
+        gating_init: float = 0.0,
+        gating_init_wrist: float = 0.0,
     ) -> None:
         super().__init__()
         self.action_dim = action_dim
@@ -26,8 +28,15 @@ class MLPResNet(nn.Module):
         self.fc1 = nn.Linear(input_dim, hidden_dim)
         self.relu = nn.ReLU()
         self.blocks = nn.ModuleList(
-            [MLPResNetBlock_Pro(dim=hidden_dim, use_wrist_bridge=use_wrist_bridge)
-             for _ in range(num_blocks)]
+            [
+                MLPResNetBlock_Pro(
+                    dim=hidden_dim,
+                    use_wrist_bridge=use_wrist_bridge,
+                    gating_init=gating_init,
+                    gating_init_wrist=gating_init_wrist,
+                )
+                for _ in range(num_blocks)
+            ]
         )
         self.layer_norm2 = nn.LayerNorm(hidden_dim)
         self.fc2 = nn.Linear(hidden_dim, output_dim)
