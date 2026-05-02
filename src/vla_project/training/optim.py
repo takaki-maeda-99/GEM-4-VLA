@@ -63,12 +63,15 @@ def build_optimizer(
     soft          = _trainable(model.soft_prompt_hub.parameters())
     aq            = _trainable(model.action_query_hub.parameters())
     head          = _trainable(model.action_head.parameters())
-    projs         = _trainable(
+    proj_params = (
         list(model.scene_proj.parameters())
         + list(model.wrist_proj.parameters())
         + list(model.proprio_proj.parameters())
         + list(model.action_decoder.parameters())
     )
+    if getattr(model, "wrist_projector_bridge", None) is not None:
+        proj_params += list(model.wrist_projector_bridge.parameters())
+    projs         = _trainable(proj_params)
 
     groups = [
         {"name": "gemma_lora",     "params": gemma_lora, "lr": lr * coefs["gemma_lora"],     "weight_decay": weight_decay},

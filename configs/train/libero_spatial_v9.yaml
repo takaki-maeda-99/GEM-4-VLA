@@ -1,0 +1,68 @@
+# V9: wrist_bridge port (vla-gemma-4 wristb_b16_v2 73% baseline arch).
+#
+# Diagnostic on 2026-05-03 confirmed v6 step_10000 outputs IDENTICAL action
+# regardless of obs/timestep (model collapsed to predicting Q99 dataset
+# mean — train loss 0.39 fits because Q99-normalized actions average ~0).
+# Root cause: action head's cross-attn streams (h_a, h_t) carry near-zero
+# obs info because frozen Gemma + LoRA r=64 can't push enough signal into
+# action positions, AND h_w is only single SigLIP final layer feeding the
+# self-attn pool not per-layer cross-attn.
+#
+# Fix (v9): use_wrist_bridge=true. Per-layer SigLIP wrist features feed
+# each MLPResNetBlock_Pro's 4th cross-attn branch (k_wrist/v_wrist with
+# tanh-gated gating_factor_wrist init at 0 for gradual ramp). This gives
+# the action head a strong obs-conditioning signal that completely bypasses
+# the LLM. Mirrors vla-gemma-4 (modeling_prismatic_gemma4.py:541-592 +
+# action_heads.py:393-488).
+#
+# Also adopts baseline hyperparams (lr/wd/clip/bs) tested in v7. Keeps
+# LoRA r=64 (Mode A) for now; v10 with Mode B (frozen, no LoRA) is a
+# follow-up if v9 alone doesn't close the gap.
+seed: 0
+model:
+  num_domains: 1
+  hidden_dim: 1536
+  num_blocks: 24
+  use_grad_checkpoint: true
+  use_wrist_bridge: true
+  lora:
+    r: 64
+    alpha: 128
+    target_modules: [q_proj, v_proj]
+    dropout: 0.0
+vision:
+  model_name: google/siglip-so400m-patch14-224
+language:
+  model_name: google/gemma-4-E2B
+data:
+  type: libero_lerobot_real
+  repo_id: lerobot/libero_spatial_image
+  stats_path: data/norm_stats/libero_spatial.json
+  unnorm_key: libero_spatial_no_noops
+  fps: 10
+  download_videos: false
+  domain_id: 0
+  last_action_chunk_mode: zero
+train:
+  batch_size: 8
+  lr: 2.0e-4
+  weight_decay: 0.01
+  max_steps: 10000
+  freeze_steps: 0
+  warmup_steps: 500
+  min_lr_ratio: 1.0
+  grad_clip_norm: 1.0
+  lr_coefs:
+    gemma_lora:     0.1
+    siglip:         0.1
+    soft_prompts:   0.1
+    action_queries: 1.0
+    projections:    1.0
+    action_head:    1.0
+  save_every: 2500
+  save_dir: outputs/libero_spatial_v9/checkpoints
+wandb:
+  enabled: true
+  project: vla-project
+  name: libero_spatial_v9_wrist_bridge
+  tags: [libero_spatial, bridge_form, legacy_block, num_blocks_24, ref_layout, ref_prompt_fmt, wrist_bridge, baseline_hyperparams]

@@ -21,12 +21,14 @@ class L1RegressionActionHead(nn.Module):
         num_blocks: int,
         num_task_tokens: int,
         use_grad_checkpoint: bool = False,
+        use_wrist_bridge: bool = False,
     ) -> None:
         super().__init__()
         self.hidden_dim = hidden_dim
         self.action_dim = action_dim
         self.num_action_chunks = num_action_chunks
         self.num_task_tokens = num_task_tokens
+        self.use_wrist_bridge = use_wrist_bridge
 
         # The MLPResNet was originally fed [B, T, action_dim*hidden_dim]; we
         # keep the same input dim so the FC1 size matches the reference. The
@@ -38,6 +40,7 @@ class L1RegressionActionHead(nn.Module):
             output_dim=hidden_dim,
             action_dim=action_dim,
             use_grad_checkpoint=use_grad_checkpoint,
+            use_wrist_bridge=use_wrist_bridge,
         )
 
     def forward(
@@ -48,5 +51,8 @@ class L1RegressionActionHead(nn.Module):
         p: torch.Tensor,                  # [B, 1, D]
         h_w=None,                         # [B, K_w, D] (Bridge self-attn pool)
         h_sp=None,                        # [B, K_sp, D] (Bridge self-attn pool)
+        h_w_bridge=None,                  # [B, num_blocks+1, K_w_b, D] (per-layer wrist cross-attn)
     ) -> torch.Tensor:
-        return self.model(x, h_a=h_a, h_t=h_t, p=p, h_w=h_w, h_sp=h_sp)
+        return self.model(
+            x, h_a=h_a, h_t=h_t, p=p, h_w=h_w, h_sp=h_sp, h_w_bridge=h_w_bridge,
+        )

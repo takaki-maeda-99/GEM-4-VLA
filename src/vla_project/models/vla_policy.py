@@ -37,6 +37,13 @@ class VLAPolicyConfig:
     # original X-VLA spec) was 16% slower per-step on A100 due to non-integer
     # downsample factor (16/7≈2.29). See Plan 9 follow-up benchmark.
     wrist_pool_tokens: int = 64
+    # Wrist bridge (per-layer SigLIP wrist features feeding each action-head
+    # block's 4th cross-attn branch). Mirrors vla-gemma-4 wristb_b16_v2 (73%
+    # LIBERO baseline). When True, the action head receives a strong
+    # obs-conditioning signal that bypasses the LLM entirely — this is the
+    # key fix for v6's constant-prediction collapse (frozen LLM + tiny LoRA
+    # couldn't push enough obs info into action positions).
+    use_wrist_bridge: bool = False
     bos_id: int = 2
     eos_id: int = 1
     loss_type: str = "l1"  # or "huber" or "ee6d"
@@ -106,7 +113,19 @@ class VLAPolicy(nn.Module):
             num_blocks=cfg.num_blocks,
             num_task_tokens=cfg.num_scene_tokens,
             use_grad_checkpoint=cfg.use_grad_checkpoint,
+            use_wrist_bridge=cfg.use_wrist_bridge,
         )
+
+        # Wrist bridge projector: single Linear(siglip_dim → llm_dim) shared
+        # across SigLIP layers. Matches vla-gemma-4
+        # ``modeling_prismatic_gemma4.py:264``: "vision_projector と同じ
+        # 2-layer MLP ではなく、単純な Linear で llm_dim に射影 (層ごとに
+        # feature distribution が違うため共有は粗いが、MVP として許容)".
+        # h_w_bridge shape after this projector: (B, num_blocks+1, 256, D).
+        if cfg.use_wrist_bridge:
+            self.wrist_projector_bridge = nn.Linear(cfg.siglip_hidden_dim, D)
+        else:
+            self.wrist_projector_bridge = None
 
     def _pool_wrist(self, wrist_tok: torch.Tensor) -> torch.Tensor:
         """Spatially average-pool a (B, N, D) wrist token sequence.
@@ -158,6 +177,26 @@ class VLAPolicy(nn.Module):
         # 2. Project to LLM dim, per domain
         scene_e = self.scene_proj(scene_tok, domain_id)        # [B, 256, D]
         wrist_e = self.wrist_proj(wrist_tok, domain_id)        # [B, 256, D]
+
+        # 2b. Wrist bridge: per-layer SigLIP wrist features projected to LLM
+        # dim, fed to the action head's 4th cross-attn branch per block.
+        # NUM_BRIDGE_LAYERS = num_blocks + 1 (block i sees layer i+1, so
+        # we need indices 0..num_blocks). HF SigLIP returns 28 hidden states
+        # for so400m-patch14-224 (1 embedding + 27 blocks); we take the
+        # first num_blocks+1 of them. The wrist_pool path is incompatible
+        # with wrist_bridge (token count mismatch); guard against it.
+        h_w_bridge = None
+        if self.cfg.use_wrist_bridge:
+            if self.cfg.use_wrist_pool:
+                raise RuntimeError(
+                    "use_wrist_bridge=True is incompatible with use_wrist_pool=True; "
+                    "wrist_bridge expects raw 256-token SigLIP per-layer features"
+                )
+            num_bridge_layers = self.cfg.num_blocks + 1
+            wrist_layers = self.vision_encoder.forward_all_layers(
+                batch["wrist_image"], num_layers=num_bridge_layers
+            )  # [B, num_bridge_layers, 256, D_vis]
+            h_w_bridge = self.wrist_projector_bridge(wrist_layers)  # [B, ..., 256, D]
 
         # 3. Soft prompts (per-domain) and action queries (shared, broadcast)
         soft_e = self.soft_prompt_hub(domain_id)
@@ -234,8 +273,14 @@ class VLAPolicy(nn.Module):
 
         # 9. action head (policy dtype throughout). h_w + h_sp join the
         # self-attn pool (concat to x post-fc1, trimmed back after blocks).
+        # When use_wrist_bridge is on, h_w is dropped from the self-attn
+        # pool (handled inside MLPResNet.forward) and h_w_bridge supplies
+        # per-layer wrist cross-attn instead.
+        if h_w_bridge is not None:
+            h_w_bridge = h_w_bridge.to(hs.dtype)
         head_out = self.action_head(
-            x_init, h_a=h_a, h_t=h_t, p=p, h_w=h_w, h_sp=h_sp,
+            x_init, h_a=h_a, h_t=h_t, p=p,
+            h_w=h_w, h_sp=h_sp, h_w_bridge=h_w_bridge,
         )                                                            # [B, T, D]
 
         # 10. action decoder.
