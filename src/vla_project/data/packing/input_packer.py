@@ -15,18 +15,30 @@ class PackedIDs:
 
 
 class InputPacker(nn.Module):
-    """Constructs Gemma4 input_ids with placeholders + index dict.
+    """Constructs Gemma4 input_ids matching the VLA-Adapter reference layout
+    that achieved the 73% LIBERO baseline.
 
     Layout (per sample):
         [BOS,
-         SoftPrompt   x Ks   (range starting at SOFT_PROMPT_BEGIN_IDX),
+         prompt text  x Lt   (padded with 0 / pad_token),
          Scene        x Ns   (IMAGE_SOFT_TOKEN_ID repeated),
-         prompt text  x Lt   (padded with 0),
-         Wrist        x Nw   (range starting at WRIST_PLACEHOLDER_BEGIN_IDX),
+         PROPRIO      x 1    (PROPRIO_PLACEHOLDER_IDX),
          ActionQuery  x Q    (range starting at ACTION_TOKEN_BEGIN_IDX),
          EOS]
 
-    No proprio in input_ids — it conditions only the action head.
+    Wrist tokens and soft prompts do NOT enter the LLM. They are produced
+    independently (wrist_proj on SigLIP wrist features, soft_prompt_hub on
+    domain_id) and feed the action head's self-attn pool directly via
+    ``h_w`` / ``h_sp``. Reference verifies (modeling_prismatic_gemma4.py:625-630):
+    "LLM inputs_embeds への prepend (案 B deviation) は廃止". Keeping
+    wrist / soft inside the LLM input distorted RoPE positions for the prompt
+    + wasted attention budget on tokens the head was already going to read
+    via separate streams.
+
+    The proprio dim is one PROPRIO_PLACEHOLDER token between vision and
+    action queries; the LLM's hidden state at that position is unused (the
+    head receives proprio via the separate proprio_proj path), but the token
+    occupies a position that the trained reference layout includes.
     """
 
     def __init__(
@@ -34,39 +46,24 @@ class InputPacker(nn.Module):
         bos_id: int,
         eos_id: int,
         prompt_max_len: int,
-        num_soft_prompt_tokens: int = C.NUM_SOFT_PROMPT_TOKENS,
         num_scene_tokens: int = C.NUM_SCENE_TOKENS,
-        num_wrist_tokens: int = C.NUM_WRIST_TOKENS,
         num_action_queries: int = C.NUM_ACTION_TOKENS,
     ) -> None:
         super().__init__()
-        if num_soft_prompt_tokens <= 0:
-            raise ValueError(f"num_soft_prompt_tokens must be > 0; got {num_soft_prompt_tokens}")
         if num_scene_tokens <= 0:
             raise ValueError(f"num_scene_tokens must be > 0; got {num_scene_tokens}")
-        if num_wrist_tokens <= 0:
-            raise ValueError(f"num_wrist_tokens must be > 0; got {num_wrist_tokens}")
         if num_action_queries <= 0:
             raise ValueError(f"num_action_queries must be > 0; got {num_action_queries}")
         self.bos_id = bos_id
         self.eos_id = eos_id
         self.prompt_max_len = prompt_max_len
-        self.num_soft_prompt_tokens = num_soft_prompt_tokens
         self.num_scene_tokens = num_scene_tokens
-        self.num_wrist_tokens = num_wrist_tokens
         self.num_action_queries = num_action_queries
 
-        soft = torch.arange(C.SOFT_PROMPT_BEGIN_IDX,
-                            C.SOFT_PROMPT_BEGIN_IDX + num_soft_prompt_tokens)
         scene = torch.full((num_scene_tokens,), C.IMAGE_SOFT_TOKEN_ID, dtype=torch.long)
-        wrist = torch.arange(C.WRIST_PLACEHOLDER_BEGIN_IDX,
-                             C.WRIST_PLACEHOLDER_BEGIN_IDX + num_wrist_tokens)
         action = torch.arange(C.ACTION_TOKEN_BEGIN_IDX,
                               C.ACTION_TOKEN_BEGIN_IDX + num_action_queries)
-        # Cached templates (registered as buffers so they move with .to(device))
-        self.register_buffer("_soft", soft, persistent=False)
         self.register_buffer("_scene", scene, persistent=False)
-        self.register_buffer("_wrist", wrist, persistent=False)
         self.register_buffer("_action", action, persistent=False)
 
     def forward(
@@ -82,47 +79,39 @@ class InputPacker(nn.Module):
 
         bos = torch.full((B, 1), self.bos_id, dtype=torch.long, device=device)
         eos = torch.full((B, 1), self.eos_id, dtype=torch.long, device=device)
-        soft = self._soft.to(device).unsqueeze(0).expand(B, -1)
         scene = self._scene.to(device).unsqueeze(0).expand(B, -1)
-        wrist = self._wrist.to(device).unsqueeze(0).expand(B, -1)
         action = self._action.to(device).unsqueeze(0).expand(B, -1)
+        proprio = torch.full((B, 1), C.PROPRIO_PLACEHOLDER_IDX, dtype=torch.long, device=device)
 
-        ids = torch.cat([bos, soft, scene, prompt_input_ids, wrist, action, eos], dim=1)
+        ids = torch.cat([bos, prompt_input_ids, scene, proprio, action, eos], dim=1)
 
-        # attention mask: 1 everywhere except prompt-padded positions
         ones = lambda n: torch.ones(B, n, dtype=torch.long, device=device)
         am = torch.cat(
             [
                 ones(1),
-                ones(soft.shape[1]),
-                ones(scene.shape[1]),
                 prompt_attention_mask,
-                ones(wrist.shape[1]),
+                ones(scene.shape[1]),
+                ones(1),
                 ones(action.shape[1]),
                 ones(1),
             ],
             dim=1,
         )
 
-        # Indices
         cur = 1
-        soft_idx = torch.arange(cur, cur + soft.shape[1], device=device).expand(B, -1)
-        cur += soft.shape[1]
-        scene_idx = torch.arange(cur, cur + scene.shape[1], device=device).expand(B, -1)
-        cur += scene.shape[1]
         prompt_idx = torch.arange(cur, cur + Lp, device=device).expand(B, -1)
         cur += Lp
-        wrist_idx = torch.arange(cur, cur + wrist.shape[1], device=device).expand(B, -1)
-        cur += wrist.shape[1]
+        scene_idx = torch.arange(cur, cur + scene.shape[1], device=device).expand(B, -1)
+        cur += scene.shape[1]
+        proprio_idx = torch.arange(cur, cur + 1, device=device).expand(B, -1)
+        cur += 1
         action_idx = torch.arange(cur, cur + action.shape[1], device=device).expand(B, -1)
         cur += action.shape[1]
-        # EOS not exposed
 
         idx: Dict[str, torch.Tensor] = {
-            "soft": soft_idx,
-            "scene": scene_idx,
             "prompt": prompt_idx,
-            "wrist": wrist_idx,
+            "scene": scene_idx,
+            "proprio": proprio_idx,
             "action": action_idx,
         }
 

@@ -83,20 +83,28 @@ class VLAPolicy(nn.Module):
             )
         self._effective_num_wrist = int(effective_num_wrist)
 
+        # Reference layout: [BOS][prompt][scene][PROPRIO 1][action][EOS].
+        # Soft prompts and wrist do NOT enter the LLM input — they feed the
+        # action head's self-attn pool directly via h_w (= wrist_e) and h_sp
+        # (= soft_e). Earlier we scattered them into the LLM, which (a)
+        # distorted RoPE positions for the prompt and (b) wasted attention
+        # budget on tokens the head was already going to consume separately.
         self.input_packer = InputPacker(
             cfg.bos_id, cfg.eos_id, cfg.prompt_max_len,
-            num_soft_prompt_tokens=cfg.num_soft_prompt_tokens,
             num_scene_tokens=cfg.num_scene_tokens,
-            num_wrist_tokens=effective_num_wrist,
             num_action_queries=cfg.num_action_queries,
         )
 
+        # h_t feeds the head from scene LLM-positions only (line 207 slice via
+        # packed.idx["scene"]). Wrist + soft prompt enter the head via the
+        # self-attn pool concat (h_w / h_sp), not as task tokens. So
+        # num_task_tokens = num_scene_tokens.
         self.action_head = L1RegressionActionHead(
             hidden_dim=D,
             action_dim=A,
             num_action_chunks=cfg.action_chunk_len,
             num_blocks=cfg.num_blocks,
-            num_task_tokens=cfg.num_scene_tokens + cfg.prompt_max_len + effective_num_wrist,
+            num_task_tokens=cfg.num_scene_tokens,
             use_grad_checkpoint=cfg.use_grad_checkpoint,
         )
 
@@ -163,9 +171,10 @@ class VLAPolicy(nn.Module):
         # already bf16 and the .to() is a no-op).
         raw_e = self.gemma.embed_tokens(packed.input_ids)
         llm_dtype = raw_e.dtype
-        emb = scatter_into_embeds(raw_e, packed.idx["soft"], soft_e.to(llm_dtype))
-        emb = scatter_into_embeds(emb, packed.idx["scene"], scene_e.to(llm_dtype))
-        emb = scatter_into_embeds(emb, packed.idx["wrist"], wrist_e.to(llm_dtype))
+        # Only scatter scene + action queries: prompt is real text tokens
+        # (already embedded by embed_tokens), proprio is a placeholder whose
+        # LLM hidden state is unused, soft / wrist are not in the LLM input.
+        emb = scatter_into_embeds(raw_e, packed.idx["scene"], scene_e.to(llm_dtype))
         emb = scatter_into_embeds(emb, packed.idx["action"], action_q_e.to(llm_dtype))
 
         out = self.gemma(

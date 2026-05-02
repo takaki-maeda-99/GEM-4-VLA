@@ -25,6 +25,13 @@ NUM_WRIST_TOKENS: int = 256
 SOFT_PROMPT_BEGIN_IDX: int = 259461 + 1   # one past PROPRIO range from vla-gemma-4
 NUM_SOFT_PROMPT_TOKENS: int = 32
 
+# === Proprio (single-token placeholder for the LLM input layout) ===
+# Matches vla-gemma-4 / VLA-Adapter reference: a single token between vision
+# and action queries that the LLM attends over for cross-modal context. The
+# proprio VECTOR itself feeds the action head separately via proprio_proj;
+# this placeholder is only an LLM positional anchor.
+PROPRIO_PLACEHOLDER_IDX: int = 259461
+
 # === Architecture-wide defaults (overridable in config) ===
 LLM_HIDDEN_DIM: int = 1536
 NUM_LLM_LAYERS: int = 35
