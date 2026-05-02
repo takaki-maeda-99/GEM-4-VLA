@@ -51,6 +51,15 @@ class LIBEROSimRobot(BaseRobot):
         self.libero_path = _ensure_libero_on_path(libero_path)
         self._env = None
         self._language: str = ""
+        # LIBERO benchmark protocol: each task has a list of pre-defined initial
+        # scene states (one per episode_idx). Standard eval calls
+        # ``env.set_init_state(initial_states[episode_idx])`` immediately after
+        # reset. Without this, sim resets to a randomized scene that the model
+        # has never seen and rollouts fail systematically. See upstream
+        # VLA-Adapter run_libero_eval.py:229-242 + 405-419.
+        self._libero_init_states: Optional[Any] = None
+        # Episode index to apply on next reset(); set via ``set_episode_idx``.
+        self._next_episode_idx: Optional[int] = None
 
     def _resolve_bddl_file(self) -> Path:
         # LIBERO's bddl files live as
@@ -92,6 +101,18 @@ class LIBEROSimRobot(BaseRobot):
         )
         self._env = OffScreenRenderEnv(**env_args)
         self._env.seed(self.seed)
+        # Load this task's standard LIBERO init_states. Match the upstream
+        # eval protocol so each rollout uses an in-distribution scene.
+        try:
+            from libero.libero import benchmark as _libero_benchmark  # type: ignore
+            benchmark_dict = _libero_benchmark.get_benchmark_dict()
+            task_suite_obj = benchmark_dict[self.task_suite]()
+            self._libero_init_states = task_suite_obj.get_task_init_states(self.task_idx)
+        except Exception as e:
+            # If init_states aren't available (older libero), fall back to
+            # plain env.reset() — random scene, eval matches will fail.
+            print(f"[LIBEROSimRobot] init_states load failed: {e!r}; using random reset")
+            self._libero_init_states = None
 
     @staticmethod
     def _language_from_bddl(text: str) -> str:
@@ -176,10 +197,27 @@ class LIBEROSimRobot(BaseRobot):
             "_raw": raw,  # kept for debugging / future success-detection
         }
 
+    def set_episode_idx(self, episode_idx: int) -> None:
+        """Mark the next ``reset()`` call to use the LIBERO benchmark's
+        standard init_state for ``episode_idx`` (0-indexed). Required for
+        in-distribution rollouts; without it, eval scenes are randomized and
+        learned policies fail.
+        """
+        self._next_episode_idx = int(episode_idx)
+
     def reset(self) -> Dict[str, Any]:
         if self._env is None:
             raise RuntimeError("LIBEROSimRobot not connected; call connect() first")
         raw = self._env.reset()
+        if self._libero_init_states is not None and self._next_episode_idx is not None:
+            ep = self._next_episode_idx
+            n = len(self._libero_init_states)
+            if 0 <= ep < n:
+                # set_init_state returns the obs dict after applying the state
+                raw = self._env.set_init_state(self._libero_init_states[ep])
+            else:
+                print(f"[LIBEROSimRobot] episode_idx={ep} out of range [0, {n}); "
+                      f"using plain reset")
         return self._wrap_obs(raw)
 
     def get_observation(self) -> Dict[str, Any]:
