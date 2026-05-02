@@ -1,0 +1,53 @@
+# V5: legacy MLPResNetBlock_Pro (use_proper_ffn=False = ref ablation winner)
+# + num_blocks=24 (paper default, NOT Gemma4's 35-layer all-tap).
+# Reference vla-gemma-4 ablation table: at 24 blocks, legacy block gave 73%
+# while proper_ffn gave only 50% — proper_ffn HURT on this benchmark.
+# All other fixes from v3/v4 retained: pre-LLM h_w/h_sp, axis-angle proprio,
+# RoPE port, init_state, BDDL ordering, Bridge concat in MLPResNet.forward.
+seed: 0
+model:
+  num_domains: 1
+  hidden_dim: 1536
+  num_blocks: 24
+  use_grad_checkpoint: true
+  lora:
+    r: 64
+    alpha: 128
+    target_modules: [q_proj, v_proj]
+    dropout: 0.0
+vision:
+  model_name: google/siglip-so400m-patch14-224
+language:
+  model_name: google/gemma-4-E2B
+data:
+  type: libero_lerobot_real
+  repo_id: lerobot/libero_spatial_image
+  stats_path: data/norm_stats/libero_spatial.json
+  unnorm_key: libero_spatial_no_noops
+  fps: 10
+  download_videos: false
+  domain_id: 0
+  last_action_chunk_mode: zero
+train:
+  batch_size: 4
+  lr: 1.0e-4
+  weight_decay: 0.0
+  max_steps: 10000
+  freeze_steps: 0
+  warmup_steps: 500
+  min_lr_ratio: 1.0
+  grad_clip_norm: 10.0
+  lr_coefs:
+    gemma_lora:     0.1
+    siglip:         0.1
+    soft_prompts:   0.1
+    action_queries: 1.0
+    projections:    1.0
+    action_head:    1.0
+  save_every: 2500
+  save_dir: outputs/libero_spatial_v5/checkpoints
+wandb:
+  enabled: true
+  project: vla-project
+  name: libero_spatial_v5_legacy_block_24nb
+  tags: [libero_spatial, bridge_form, legacy_block, num_blocks_24]
