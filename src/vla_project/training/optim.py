@@ -83,4 +83,10 @@ def build_optimizer(
     ]
     # Drop empty groups (frozen modules contribute nothing).
     groups = [g for g in groups if g["params"]]
-    return torch.optim.AdamW(groups, betas=(0.9, 0.95))
+    # AdamW betas: vla-gemma-4 73% baseline uses PyTorch default (0.9, 0.999)
+    # for non-pretrain (Stage 1-2) finetune runs. The X-VLA pretrain convention
+    # (0.9, 0.95) is reserved for the multi-domain Stage 3 pretrain only.
+    # Verified at vla-gemma-4 ``finetune_gemma4.py:1031`` (no betas arg →
+    # defaults). Mismatch was a likely contributor to our train loss not
+    # tracking the baseline.
+    return torch.optim.AdamW(groups, betas=(0.9, 0.999))
