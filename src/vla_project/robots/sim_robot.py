@@ -134,27 +134,28 @@ class LIBEROSimRobot(BaseRobot):
         # (lines 143-154) so closed-loop obs match the dataset distribution.
         scene = scene[::-1, ::-1, :]
         wrist = wrist[::-1, ::-1, :]
-        # Convert sim's eef_quat (xyzw) to Euler (xyz / roll-pitch-yaw) so
-        # proprio matches the dataset format. LIBERO sim's quat appears as
-        # [x, y, z, w]; scipy.Rotation expects xyzw too. Quaternion q and -q
-        # represent the same rotation; the LeRobot dataset's Euler appears
-        # consistent with the +w hemisphere (e.g. roll = +π for arm-down at
-        # ep start), while LIBERO sim sometimes returns the -w hemisphere
-        # (giving roll = -π for the same physical pose). Canonicalize by
-        # flipping the quat to the +w hemisphere before Euler conversion so
-        # train and eval proprio land in the same Euler chart.
-        from scipy.spatial.transform import Rotation as _R
+        # Convert sim's eef_quat (xyzw) to axis-angle (3 dims) to match the
+        # LeRobot LIBERO dataset's observation.state format. The dataset's
+        # schema labels 8 dims as ['x','y','z','rx','ry','rz','rw','gripper']
+        # but inspection of values + cross-reference with upstream
+        # VLA-Adapter (experiments/robot/libero/libero_utils.py:63-87 +
+        # run_libero_eval.py:260) shows the 4th-7th components are actually
+        # 3 axis-angle + 2 gripper qpos, NOT a quaternion + 1 gripper. Use
+        # the upstream's quat2axisangle implementation verbatim.
         quat_xyzw = np.asarray(raw["robot0_eef_quat"], dtype=np.float32)
-        if quat_xyzw[3] < 0.0:
-            quat_xyzw = -quat_xyzw
-        euler = _R.from_quat(quat_xyzw).as_euler("xyz", degrees=False).astype(np.float32)
-        # The arm-pointing-down configuration (the only one LIBERO-Spatial uses
-        # at episode start) has roll ≈ ±π. scipy's Euler decomposition is on a
-        # rotation boundary here and returns -π for sim's quat while the
-        # LeRobot LIBERO dataset records +π for the same physical pose. Take
-        # absolute value of roll to align both to +π. Pitch/yaw unaffected
-        # (they are well inside [-π/2, π/2]).
-        euler[0] = abs(euler[0])
+        # quat2axisangle (from robosuite via VLA-Adapter)
+        if quat_xyzw[3] > 1.0:
+            quat_xyzw[3] = 1.0
+        elif quat_xyzw[3] < -1.0:
+            quat_xyzw[3] = -1.0
+        den = float(np.sqrt(1.0 - quat_xyzw[3] * quat_xyzw[3]))
+        import math as _math
+        if _math.isclose(den, 0.0):
+            axis_angle = np.zeros(3, dtype=np.float32)
+        else:
+            axis_angle = (
+                quat_xyzw[:3].astype(np.float32) * 2.0 * _math.acos(float(quat_xyzw[3])) / den
+            ).astype(np.float32)
         gripper = np.asarray(raw["robot0_gripper_qpos"], dtype=np.float32)
         if gripper.shape[0] < 2:
             # Some LIBERO versions report only one finger. Pad with the
@@ -164,7 +165,7 @@ class LIBEROSimRobot(BaseRobot):
             gripper = gripper[:2]
         proprio = np.concatenate([
             np.asarray(raw["robot0_eef_pos"], dtype=np.float32),
-            euler,
+            axis_angle,
             gripper,
         ]).astype(np.float32)
         return {
