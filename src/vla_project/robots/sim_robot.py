@@ -61,10 +61,19 @@ class LIBEROSimRobot(BaseRobot):
         # Episode index to apply on next reset(); set via ``set_episode_idx``.
         self._next_episode_idx: Optional[int] = None
 
-    def _resolve_bddl_file(self) -> Path:
-        # LIBERO's bddl files live as
-        # bddl_files/<suite>/<task_index>_*.bddl. We pick the file whose name
-        # starts with the integer task_idx.
+    def _resolve_bddl_file(self, task_obj=None) -> Path:
+        # LIBERO benchmark task ordering is defined by libero_suite_task_map (NOT
+        # alphabetical). When ``task_obj`` is supplied (preferred path, via the
+        # libero.benchmark API used in connect()), we resolve directly from
+        # ``task_obj.problem_folder`` + ``task_obj.bddl_file`` so the same
+        # ``task_idx`` used for init_states points to the same BDDL file.
+        # Without this, alphabetical glob ordering disagrees with the benchmark
+        # ordering on every task except 0 — env opens BDDL X but is initialized
+        # with init_state for task Y.
+        if task_obj is not None:
+            return self.bddl_path_root / task_obj.problem_folder / task_obj.bddl_file
+        # Legacy fallback: alphabetical glob (pre-fix behavior, kept for tests
+        # that don't import the libero benchmark module).
         suite_dir = self.bddl_path_root / self.task_suite
         if not suite_dir.is_dir():
             raise FileNotFoundError(f"BDDL suite dir not found: {suite_dir}")
@@ -85,7 +94,18 @@ class LIBEROSimRobot(BaseRobot):
                 f"libero not importable from {self.libero_path}; "
                 f"set LIBERO_PATH env var or pass libero_path= to LIBEROSimRobot"
             ) from e
-        bddl_file = self._resolve_bddl_file()
+        # Resolve BDDL file via the libero benchmark API (matches task_idx ↔
+        # init_states convention). Fall back to legacy alphabetical glob if
+        # libero isn't importable (e.g., stub-based tests).
+        task_obj = None
+        try:
+            from libero.libero import benchmark as _libero_benchmark  # type: ignore
+            benchmark_dict = _libero_benchmark.get_benchmark_dict()
+            task_suite_obj = benchmark_dict[self.task_suite]()
+            task_obj = task_suite_obj.tasks[self.task_idx]
+        except Exception:
+            task_suite_obj = None
+        bddl_file = self._resolve_bddl_file(task_obj=task_obj)
         # Pull the task language from the BDDL file (heuristic: first line that
         # contains a quoted natural-language goal). Fallback to the file stem.
         try:
@@ -111,11 +131,11 @@ class LIBEROSimRobot(BaseRobot):
         try:
             import os as _os
             import torch as _torch
-            from libero.libero import benchmark as _libero_benchmark  # type: ignore
             from libero.libero import get_libero_path as _get_libero_path  # type: ignore
-            benchmark_dict = _libero_benchmark.get_benchmark_dict()
-            task_suite_obj = benchmark_dict[self.task_suite]()
-            task_obj = task_suite_obj.tasks[self.task_idx]
+            if task_obj is None:
+                # task_obj wasn't loaded above (e.g. libero importable but
+                # benchmark missing). Skip init_states.
+                raise RuntimeError("task_obj unavailable")
             init_states_path = _os.path.join(
                 _get_libero_path("init_states"),
                 task_obj.problem_folder,
