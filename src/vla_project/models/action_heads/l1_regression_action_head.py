@@ -24,6 +24,7 @@ class L1RegressionActionHead(nn.Module):
         use_wrist_bridge: bool = False,
         gating_init: float = 0.0,
         gating_init_wrist: float = 0.0,
+        ungated_streams: bool = False,
     ) -> None:
         super().__init__()
         self.hidden_dim = hidden_dim
@@ -45,6 +46,7 @@ class L1RegressionActionHead(nn.Module):
             use_wrist_bridge=use_wrist_bridge,
             gating_init=gating_init,
             gating_init_wrist=gating_init_wrist,
+            ungated_streams=ungated_streams,
         )
 
     def forward(

@@ -1,0 +1,70 @@
+# V11: ungated streams (no tanh gating on task/wrist cross-attn).
+#
+# v9 (cold gating init=0) and v10 (warm init=0.5) both produced constant
+# predictions because:
+#   - v9: gating ramped only to ~0.024 at step_5000; cross-attn streams
+#         contributed almost nothing.
+#   - v10: gating stayed EXACTLY at 0.5 init (didn't move at all). Root
+#         cause: bf16 precision. ULP at 0.5 is 2^-7 * 0.5 ≈ 0.0039, which
+#         is larger than typical AdamW updates (lr=2e-4 × grad), so every
+#         update rounds to zero.
+#
+# v11 fix: ``ungated_streams=true``. Drop the tanh(g) factor entirely and
+# use a fixed scale of 1.0 for task and wrist cross-attn streams. The
+# model can still suppress unhelpful streams via the k_task / k_wrist
+# projection weights (which can shrink toward zero). Eliminates the
+# bf16-precision trap and gives the action head full obs conditioning
+# from step 1.
+#
+# Architecture and other hyperparams identical to v9/v10 (bs=8, lr=2e-4,
+# wd=0.01, clip=1.0, num_blocks=24, legacy block, ref input layout, ref
+# prompt fmt, LoRA r=64, use_wrist_bridge=true).
+seed: 0
+model:
+  num_domains: 1
+  hidden_dim: 1536
+  num_blocks: 24
+  use_grad_checkpoint: true
+  use_wrist_bridge: true
+  ungated_streams: true
+  lora:
+    r: 64
+    alpha: 128
+    target_modules: [q_proj, v_proj]
+    dropout: 0.0
+vision:
+  model_name: google/siglip-so400m-patch14-224
+language:
+  model_name: google/gemma-4-E2B
+data:
+  type: libero_lerobot_real
+  repo_id: lerobot/libero_spatial_image
+  stats_path: data/norm_stats/libero_spatial.json
+  unnorm_key: libero_spatial_no_noops
+  fps: 10
+  download_videos: false
+  domain_id: 0
+  last_action_chunk_mode: zero
+train:
+  batch_size: 8
+  lr: 2.0e-4
+  weight_decay: 0.01
+  max_steps: 10000
+  freeze_steps: 0
+  warmup_steps: 500
+  min_lr_ratio: 1.0
+  grad_clip_norm: 1.0
+  lr_coefs:
+    gemma_lora:     0.1
+    siglip:         0.1
+    soft_prompts:   0.1
+    action_queries: 1.0
+    projections:    1.0
+    action_head:    1.0
+  save_every: 2500
+  save_dir: outputs/libero_spatial_v11/checkpoints
+wandb:
+  enabled: true
+  project: vla-project
+  name: libero_spatial_v11_ungated
+  tags: [libero_spatial, bridge_form, legacy_block, num_blocks_24, ref_layout, ref_prompt_fmt, wrist_bridge, ungated_streams]

@@ -48,8 +48,17 @@ class VLAPolicyConfig:
     # ~0.55 → tanh≈0.5 immediate cross-attn contribution; 1.0 → tanh≈0.76.
     # Default 0 matches reference; use >0 for our smaller-bs runs to avoid
     # the ramp-too-slow collapse observed in v6/v9-step_2500 diagnostics.
+    # NOTE: warm-init at 0.5 was found unable to train under bf16 (the ULP
+    # at value 0.5 is ~0.0039, larger than typical AdamW updates). Use
+    # ``ungated_streams=True`` instead to remove the gating bottleneck.
     gating_init: float = 0.0
     gating_init_wrist: float = 0.0
+    # ``ungated_streams=True`` removes the learnable tanh gating from the
+    # task and wrist cross-attn streams (fixed scale = 1.0). This avoids
+    # the bf16 precision trap that froze warm-init updates in v10. The
+    # model can still suppress unhelpful streams via the k_task / k_wrist
+    # projection weights.
+    ungated_streams: bool = False
     bos_id: int = 2
     eos_id: int = 1
     loss_type: str = "l1"  # or "huber" or "ee6d"
@@ -122,6 +131,7 @@ class VLAPolicy(nn.Module):
             use_wrist_bridge=cfg.use_wrist_bridge,
             gating_init=cfg.gating_init,
             gating_init_wrist=cfg.gating_init_wrist,
+            ungated_streams=cfg.ungated_streams,
         )
 
         # Wrist bridge projector: single Linear(siglip_dim → llm_dim) shared
