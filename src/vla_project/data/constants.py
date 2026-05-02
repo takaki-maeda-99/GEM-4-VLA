@@ -41,7 +41,7 @@ NUM_SCENE_TOKENS: int = 256
 SIGLIP_HIDDEN_DIM: int = 1152
 SIGLIP_IMAGE_SIZE: int = 224
 
-DEFAULT_PROMPT_MAX_LEN: int = 50
+DEFAULT_PROMPT_MAX_LEN: int = 20  # match vla-gemma-4 73% baseline (libero_loader.py:74)
 
 ACTION_CHUNK_LEN: int = 8
 ACTION_DIM: int = 7
