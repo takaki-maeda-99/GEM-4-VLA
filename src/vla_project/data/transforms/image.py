@@ -5,14 +5,31 @@ from torchvision.transforms.functional import InterpolationMode
 
 
 class SiglipImageTransform(nn.Module):
-    """SigLIP-So400m expects 224x224, normalized by SigLIP statistics."""
+    """SigLIP-So400m timm-default transform.
+
+    Pipeline (matches vla-gemma-4 73% baseline + timm SigLIP default):
+      Resize(248, bicubic, antialias=True) -> CenterCrop(224) -> Normalize(0.5, 0.5)
+
+    Earlier versions used a direct Resize(224) which gave a different field
+    of view than the reference (248-then-crop slightly zooms in, dropping
+    edge pixels). For SigLIP features to match the reference, both train
+    and eval images must traverse the same crop pipeline.
+    """
 
     MEAN = (0.5, 0.5, 0.5)
     STD = (0.5, 0.5, 0.5)
+    RESIZE_SIZE = 248
 
     def __init__(self, size: int = 224, training: bool = False) -> None:
         super().__init__()
-        ops = [T.Resize((size, size), interpolation=InterpolationMode.BICUBIC)]
+        ops = [
+            T.Resize(
+                self.RESIZE_SIZE,
+                interpolation=InterpolationMode.BICUBIC,
+                antialias=True,
+            ),
+            T.CenterCrop(size),
+        ]
         if training:
             ops.append(T.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.0))
         ops.append(T.Normalize(self.MEAN, self.STD))
