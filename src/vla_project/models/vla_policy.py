@@ -243,9 +243,19 @@ class VLAPolicy(nn.Module):
         emb = scatter_into_embeds(raw_e, packed.idx["scene"], scene_e.to(llm_dtype))
         emb = scatter_into_embeds(emb, packed.idx["action"], action_q_e.to(llm_dtype))
 
+        # Match vla-gemma-4 73% baseline: pass all-ones attention_mask. The
+        # baseline ignores prompt padding (modeling_prismatic_gemma4.py:634
+        # `attention_mask = torch.ones(B, L_total, ...)`). Using the
+        # `packed.attention_mask` we built (with 0 for padded prompt
+        # positions) changes Gemma4's attention pattern from what its
+        # pretrained weights were learned with — we do NOT want that.
+        L_total = packed.input_ids.shape[1]
+        all_ones_attn = torch.ones(
+            B, L_total, dtype=packed.attention_mask.dtype, device=packed.input_ids.device
+        )
         out = self.gemma(
             input_ids=packed.input_ids,
-            attention_mask=packed.attention_mask,
+            attention_mask=all_ones_attn,
             inputs_embeds=emb,
         )
         hs = out.hidden_states  # [B, layers+1, L, D] in llm_dtype
