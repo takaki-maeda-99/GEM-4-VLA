@@ -44,6 +44,23 @@ def _build_dataloader(cfg: DictConfig, prompt_max_len: int, language_model_name:
             ds, batch_size=cfg.train.batch_size,
             collate_fn=LeRobotLiberoDataset.collate_fn,
         )
+    if data_type == "libero_rlds":
+        tok = GemmaPromptTokenizer(model_name=language_model_name, max_len=prompt_max_len)
+        from vla_project.data.datasets.rlds_libero_dataset import RLDSLiberoDataset
+        ds = RLDSLiberoDataset(
+            data_dir=cfg.data.data_dir,
+            dataset_name=str(cfg.data.dataset_name),
+            tokenizer=tok,
+            action_chunk_len=int(cfg.data.get("action_chunk_len", 8)),
+            shuffle_buffer_size=int(cfg.data.get("shuffle_buffer_size", 256000)),
+            train=bool(cfg.data.get("train", True)),
+            domain_id=int(cfg.data.get("domain_id", 0)),
+            seed=int(cfg.data.get("seed", 42)),
+        )
+        return DataLoader(
+            ds, batch_size=cfg.train.batch_size,
+            collate_fn=RLDSLiberoDataset.collate_fn,
+        )
     if data_type == "libero_lerobot_multidomain":
         tok = GemmaPromptTokenizer(model_name=language_model_name, max_len=prompt_max_len)
         children: list = []
@@ -82,12 +99,19 @@ def main(cfg_path: str) -> None:
     # reads LOCAL_RANK and resolves to cuda:LOCAL_RANK so FSDP / DDP both
     # see the model on the expected device.
     from accelerate import Accelerator
+    from accelerate.utils import DistributedDataParallelKwargs
+    # find_unused_parameters=True: Mode B configs leave the LLM frozen (no
+    # grad to gemma params) and use_wrist_bridge replaces wrist_proj's role
+    # with h_w_bridge so wrist_proj receives no grad either. Without this
+    # flag, DDP's bucketing trips on the second iteration ("Expected to have
+    # finished reduction in the prior iteration").
+    ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
     # wandb is ENABLED by default. Set `wandb.enabled: false` in the config,
     # or export `WANDB_MODE=disabled` (no run, no files) / `WANDB_MODE=offline`
     # (local cache only, no server) to opt out for one-off smoke runs.
     wandb_cfg = cfg.get("wandb", {})
     if wandb_cfg.get("enabled", True):
-        accelerator = Accelerator(log_with="wandb")
+        accelerator = Accelerator(log_with="wandb", kwargs_handlers=[ddp_kwargs])
         accelerator.init_trackers(
             project_name=wandb_cfg.get("project", "vla-project"),
             config=OmegaConf.to_container(cfg, resolve=True),
@@ -100,7 +124,7 @@ def main(cfg_path: str) -> None:
         )
         print(f"[train] wandb tracking enabled: project={wandb_cfg.get('project', 'vla-project')!r}")
     else:
-        accelerator = Accelerator()
+        accelerator = Accelerator(kwargs_handlers=[ddp_kwargs])
     device = accelerator.device
     dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
     print(f"[train] device={device} dtype={dtype}")

@@ -1,0 +1,65 @@
+# V23: RLDS data source (matches vla-gemma-4 73% baseline EXACTLY).
+#
+# Switches our dataset from LeRobot to RLDS (data/modified_libero_rlds).
+# The RLDS pipeline auto-normalizes action and proprio with BOUNDS_Q99
+# inside the loader (action_proprio_normalization_type=NormalizationType.
+# BOUNDS_Q99), so values arrive already in [-1, +1] — no double
+# normalization needed.
+#
+# Other changes from v22:
+#   - data.type: libero_rlds (new dataset class)
+#   - shuffle handled inside RLDS via shuffle_buffer_size=256000
+#   - gating retained from v22 (gated tanh, init=0)
+#
+# Requires the vla-gemma-4 venv (tensorflow + dlimp + prismatic.vla.datasets):
+#   PYTHONPATH=src:VLA-Adapter:/misc/dl00/takaki/vla-gemma-4 \
+#   /misc/dl00/takaki/vla-gemma-4/.venv-gemma4/bin/python scripts/train.py \
+#       configs/train/libero_spatial_v23.yaml
+seed: 0
+model:
+  num_domains: 1
+  hidden_dim: 1536
+  num_blocks: 24
+  use_grad_checkpoint: true
+  use_wrist_bridge: true
+  ungated_streams: false       # gated tanh (matches baseline)
+  use_soft_prompt: false
+  prompt_max_len: 20
+vision:
+  model_name: google/siglip-so400m-patch14-224
+language:
+  model_name: google/gemma-4-E2B
+data:
+  type: libero_rlds
+  data_dir: /misc/dl00/takaki/vla-gemma-4/data/modified_libero_rlds
+  dataset_name: libero_spatial_no_noops
+  action_chunk_len: 8
+  shuffle_buffer_size: 256000
+  train: true
+  domain_id: 0
+  seed: 42
+  unnorm_key: libero_spatial_no_noops   # for eval-time stats only
+  stats_path: /misc/dl00/takaki/vla-gemma-4/VLA-Adapter/outputs/LIBERO-Spatial-Pro/dataset_statistics.json
+train:
+  batch_size: 8
+  lr: 2.0e-4
+  weight_decay: 0.01
+  max_steps: 10000
+  freeze_steps: 0
+  warmup_steps: 500
+  min_lr_ratio: 1.0
+  grad_clip_norm: 1.0
+  lr_coefs:
+    gemma_lora:     0.0
+    siglip:         0.0
+    soft_prompts:   0.0
+    action_queries: 1.0
+    projections:    1.0
+    action_head:    1.0
+  save_every: 2500
+  save_dir: outputs/libero_spatial_v23/checkpoints
+wandb:
+  enabled: true
+  project: vla-project
+  name: libero_spatial_v23_rlds
+  tags: [libero_spatial, rlds, mode_b, wrist_bridge, gated, baseline_data]
