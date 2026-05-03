@@ -302,15 +302,26 @@ class LeRobotLiberoDataset(IterableDataset):
         }
 
     def __iter__(self) -> Iterator[Dict[str, torch.Tensor]]:
-        # Shard the frame range across DataLoader workers: worker 0 reads
-        # indices [0, N, 2N, ...], worker 1 reads [1, N+1, 2N+1, ...] etc.
-        # This avoids each worker iterating the full dataset (and yielding
-        # duplicate samples) under DataLoader(num_workers > 0).
+        # Shard the frame range across **both DDP ranks AND DataLoader
+        # workers**. Without explicit DDP sharding, accelerate's
+        # IterableDatasetShard wraps the loader but each rank's underlying
+        # IterableDataset still walks the full dataset; the wrapper then
+        # takes every world_size-th yielded item — net effective batch is
+        # the per-rank bs, NOT bs × world_size.
+        #
+        # Combined sharding: rank r, worker w out of (world_size W,
+        # num_workers N) reads indices [r*N + w, r*N + w + W*N, ...].
+        # This ensures each (rank, worker) pair reads a disjoint stride.
+        import os
+        ddp_rank = int(os.environ.get("RANK", 0))
+        ddp_world = int(os.environ.get("WORLD_SIZE", 1))
         info = torch.utils.data.get_worker_info()
         if info is None:
-            start, stride = 0, 1
+            worker_id, num_workers = 0, 1
         else:
-            start, stride = info.id, info.num_workers
+            worker_id, num_workers = info.id, info.num_workers
+        start = ddp_rank * num_workers + worker_id
+        stride = ddp_world * num_workers
         emitted = 0
         expected_chunk_len = (
             2 * self.action_chunk_len
