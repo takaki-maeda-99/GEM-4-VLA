@@ -1,0 +1,53 @@
+# V17: 4-GPU DDP (bs=8 × 4 = effective 32) — matches vla-gemma-4 baseline
+# effective batch exactly. All 13 fixes from v16 retained.
+#
+# Effective batch parity is critical: baseline used 2-GPU DDP × bs=16 =
+# effective 32. v16 single-GPU bs=8 = effective 8 → 4x fewer samples per
+# step → loss converges 4x slower in steps. With DDP-4 × bs=8 we match
+# the baseline's per-step gradient signal.
+seed: 0
+model:
+  num_domains: 1
+  hidden_dim: 1536
+  num_blocks: 24
+  use_grad_checkpoint: true
+  use_wrist_bridge: true
+  ungated_streams: true
+  use_soft_prompt: false
+  prompt_max_len: 20
+vision:
+  model_name: google/siglip-so400m-patch14-224
+language:
+  model_name: google/gemma-4-E2B
+data:
+  type: libero_lerobot_real
+  repo_id: lerobot/libero_spatial_image
+  stats_path: data/norm_stats/libero_spatial.json
+  unnorm_key: libero_spatial_no_noops
+  fps: 10
+  download_videos: false
+  domain_id: 0
+  last_action_chunk_mode: zero
+train:
+  batch_size: 8        # per-GPU; 4-GPU DDP → effective 32
+  lr: 2.0e-4
+  weight_decay: 0.01
+  max_steps: 10000
+  freeze_steps: 0
+  warmup_steps: 500
+  min_lr_ratio: 1.0
+  grad_clip_norm: 1.0
+  lr_coefs:
+    gemma_lora:     0.0
+    siglip:         0.0
+    soft_prompts:   0.0
+    action_queries: 1.0
+    projections:    1.0
+    action_head:    1.0
+  save_every: 2500
+  save_dir: outputs/libero_spatial_v21/checkpoints
+wandb:
+  enabled: true
+  project: vla-project
+  name: libero_spatial_v21_siglip_layeridx_fix
+  tags: [libero_spatial, full_match, mode_b, wrist_bridge, ungated, proprio_norm, ddp4_eff32]

@@ -302,17 +302,16 @@ class LeRobotLiberoDataset(IterableDataset):
         }
 
     def __iter__(self) -> Iterator[Dict[str, torch.Tensor]]:
-        # Shard the frame range across **both DDP ranks AND DataLoader
-        # workers**. Without explicit DDP sharding, accelerate's
-        # IterableDatasetShard wraps the loader but each rank's underlying
-        # IterableDataset still walks the full dataset; the wrapper then
-        # takes every world_size-th yielded item — net effective batch is
-        # the per-rank bs, NOT bs × world_size.
+        # Shard + shuffle. Without shuffle, deterministic stride iteration
+        # produces highly-correlated batches (consecutive frames from the
+        # same episode) → high inter-batch loss variance, slow convergence.
+        # vla-gemma-4 RLDS pipeline uses shuffle_buffer_size=256000.
         #
         # Combined sharding: rank r, worker w out of (world_size W,
-        # num_workers N) reads indices [r*N + w, r*N + w + W*N, ...].
-        # This ensures each (rank, worker) pair reads a disjoint stride.
-        import os
+        # num_workers N) reads indices [r*N + w, r*N + w + W*N, ...] of a
+        # SHUFFLED index permutation. Each (rank, worker) walks a disjoint
+        # stride of randomly-ordered frames, so batches mix episodes.
+        import os, random as _random
         ddp_rank = int(os.environ.get("RANK", 0))
         ddp_world = int(os.environ.get("WORLD_SIZE", 1))
         info = torch.utils.data.get_worker_info()
@@ -330,11 +329,17 @@ class LeRobotLiberoDataset(IterableDataset):
         )
         # Single-pass iteration. Trainer calls iter(dataloader) again to restart.
         chunk_key = "action" if self.action_format == "native" else "observation.state"
+        # Build the per-rank/worker index list, then SHUFFLE it. Use a
+        # rank-and-worker-distinct seed so each rank/worker gets a different
+        # permutation but the SAME rank/worker is reproducible across epochs
+        # (no torch.utils.data state-tracking needed).
+        rng = _random.Random(start)  # seed = rank*N + worker_id
         if self._task_filtered_indices is not None:
-            # Pre-computed: only frames whose episode matches task_index_filter.
-            indices = self._task_filtered_indices[start::stride]
+            full_indices = list(self._task_filtered_indices[start::stride])
         else:
-            indices = range(start, len(self.ds), stride)
+            full_indices = list(range(start, len(self.ds), stride))
+        rng.shuffle(full_indices)
+        indices = full_indices
         for i in indices:
             if self.max_samples is not None and emitted >= self.max_samples:
                 return
