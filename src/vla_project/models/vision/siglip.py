@@ -49,30 +49,36 @@ class SigLIPEncoder(nn.Module):
         return out
 
     def forward_all_layers(self, pixel_values: torch.Tensor, num_layers: int) -> torch.Tensor:
-        """Return per-layer features for the wrist_bridge stream.
+        """Return per-layer **block outputs** for the wrist_bridge stream.
 
-        Output shape: ``(B, num_layers, num_tokens, hidden_dim)``.
+        Output shape: ``(B, num_layers, num_tokens, hidden_dim)`` where
+        index ``k`` is the output of SigLIP transformer block ``k`` (NOT
+        the embedding layer, which is hidden_states[0] in HF — we skip it).
 
-        ``num_layers`` is **inclusive of the embedding** (idx 0); indices
-        1..num_layers-1 are the first (num_layers-1) transformer block
-        outputs. For ``num_blocks=24`` action-head blocks, pass
-        ``num_layers=25`` so block i in the head can index
-        ``h_w_bridge[:, i+1]`` (1..24 covering block_outputs 0..23).
+        Matches vla-gemma-4 timm semantics:
+        ``featurizer.get_intermediate_layers(x, n=list(range(num_layers)))``
+        returns block outputs at indices 0..num_layers-1, NOT the embedding.
 
-        Mirrors vla-gemma-4's
-        ``modeling_prismatic_gemma4.py:557-578`` per_layer mode (with the
-        timm-specific ``get_intermediate_layers`` replaced by HF's
-        ``output_hidden_states=True``). The HF SigLIPVision encoder for
-        ``so400m-patch14-224`` returns 28 hidden states (1 embedding + 27
-        blocks); we slice the first ``num_layers``.
+        Earlier we returned hidden_states[:num_layers] which started with
+        the embedding output and dropped the deepest block — an off-by-one
+        that fed the head's block i with SigLIP block (i-1) output instead
+        of SigLIP block (i+1) as in the 73% baseline.
+
+        For ``num_blocks=24`` head blocks, pass ``num_layers=num_blocks+1=25``;
+        head block i indexes ``h_w_bridge[:, i+1]`` (idx 1..24) which now
+        correctly maps to SigLIP block 1..24 outputs.
         """
         assert self.model is not None
         out = self.model(pixel_values=pixel_values, output_hidden_states=True)
-        all_hs = out.hidden_states  # tuple length 28 of (B, 256, D)
-        if num_layers > len(all_hs):
+        # all_hs[0] is the embedding output; all_hs[1..N] are block outputs
+        # (for so400m-patch14-224 N=27 → tuple length 28).
+        all_hs = out.hidden_states
+        # We want block outputs 0..num_layers-1 = all_hs[1..num_layers].
+        if num_layers + 1 > len(all_hs):
             raise ValueError(
-                f"num_layers={num_layers} > available SigLIP hidden_states={len(all_hs)}"
+                f"num_layers={num_layers} requires {num_layers+1} hidden_states "
+                f"(embedding + {num_layers} blocks); SigLIP returned only {len(all_hs)}"
             )
-        stacked = torch.stack(all_hs[:num_layers], dim=1)  # (B, num_layers, 256, D)
+        stacked = torch.stack(all_hs[1 : num_layers + 1], dim=1)
         assert stacked.shape[2:] == (self.num_tokens, self.hidden_dim)
         return stacked
