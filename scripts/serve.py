@@ -39,17 +39,24 @@ def main(argv: list[str] | None = None) -> int:
                     help="test-only: sleep N seconds before predict to exercise the latency log path")
     args = ap.parse_args(argv)
 
-    if args.predictor == "xvla_adapter" and args.checkpoint is None:
-        ap.error("--checkpoint required when --predictor xvla_adapter")
-
+    # logging.basicConfig stays here intentionally: entry-point convention.
+    # Moving it into build_app would mean library import has global side-effects
+    # on root logger config, which is bad practice.
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    app = build_app(
-        predictor_kind=args.predictor,
-        checkpoint=args.checkpoint,
-        deploy_config_path=args.deploy_config,
-        domain_id=args.domain_id,
-        inject_sleep_s=args.inject_sleep,
-    )
+
+    # Predictor/checkpoint validation lives in build_app only (CLAUDE.md "Scripts"
+    # thinness rule). build_app raises ValueError if --checkpoint is missing for
+    # xvla_adapter mode; we catch it here to present an argparse-style CLI error.
+    try:
+        app = build_app(
+            predictor_kind=args.predictor,
+            checkpoint=args.checkpoint,
+            deploy_config_path=args.deploy_config,
+            domain_id=args.domain_id,
+            inject_sleep_s=args.inject_sleep,
+        )
+    except ValueError as e:
+        ap.error(str(e))
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
     return 0
 
