@@ -258,16 +258,28 @@ class TestPostprocess:
             adapter.postprocess(np.zeros((1, 8), dtype=np.float32))
 
     def test_q99_denormalize_respects_mask_false_passthrough(self):
+        """Verifies inverse of training-time normalize_action_q99:
+            raw = q01 + (norm + 1) * span / 2
+        Uses an asymmetric Q99 envelope where (mean != midpoint) so the
+        original plan's incorrect formula `mean + a * span/2` would be
+        detected here."""
         cfg_d = _minimal_deploy_yaml()
         cfg = DeployConfig.model_validate(cfg_d)
-        # action.std=1 mean=0 except gripper (mask=False) — gripper dim untouched
         stats = _norm_stats_v36()
-        stats["action"]["mean"] = [10.0] * 7  # would offset all dims if mask were True
+        # asymmetric: q01=-2, q99=1 → span=3, midpoint=-0.5 (≠ mean=0)
+        stats["action"]["q01"] = [-2.0] * 7
+        stats["action"]["q99"] = [1.0] * 7
+        stats["action"]["mean"] = [0.0] * 7
         adapter = DomainAdapter(cfg, stats, domain_id=0)
-        native = np.array([[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5]], dtype=np.float32)
-        # gripper (mask=False) passes through unchanged; ee dims get +10 offset
+        native = np.array([[0.0, 1.0, -1.0, 0.0, 0.0, 0.0, 0.5]], dtype=np.float32)
         out = adapter.postprocess(native, denormalize=True)
-        assert out[0][0] == pytest.approx(11.0)
+        # 0.0 → q01 + 0.5*span = -2 + 1.5 = -0.5 (midpoint)
+        # 1.0 → q01 + 1.0*span = -2 + 3.0 = 1.0 (= q99)
+        # -1.0 → q01 + 0.0*span = -2.0 (= q01)
+        assert out[0][0] == pytest.approx(-0.5)
+        assert out[0][1] == pytest.approx(1.0)
+        assert out[0][2] == pytest.approx(-2.0)
+        # gripper (mask=False) passes through unchanged
         assert out[0][6] == pytest.approx(0.5)
 
 

@@ -281,18 +281,24 @@ class DomainAdapter:
         return a.tolist()
 
     def _q99_denorm_action(self, a: np.ndarray) -> np.ndarray:
+        """Inverse of training-time normalize_action_q99.
+
+        Mirrors data/normalization.py:denormalize_action_q99 exactly:
+            raw = q01 + (a + 1) * span / 2     where span = q99 - q01
+        For mask=False dims (e.g., gripper), pass through unchanged.
+
+        NOTE: an earlier draft of the plan used `mean + a * span / 2`, which is
+        only equivalent when mean == (q01 + q99) / 2 (symmetric distribution).
+        Real LIBERO action stats are skewed, so that formula produced a
+        per-dim offset proportional to (mean - mid). Fixed here.
+        """
         stats = self.norm_stats[self.cfg.action.denormalization.stats_key]  # type: ignore[index]
         q01 = np.asarray(stats["q01"], dtype=np.float32)
         q99 = np.asarray(stats["q99"], dtype=np.float32)
-        mean = np.asarray(stats["mean"], dtype=np.float32)
         mask = np.asarray(stats.get("mask", [True] * a.shape[1]), dtype=bool)
         span = q99 - q01
         span = np.where(span == 0, 1.0, span)
-        # Q99 uses mean+std, but the spec aligns with the existing
-        # denormalize_action_q99 path which uses (q01, q99) + mean. We mirror
-        # that: physical = mean + arr * (q99 - q01) / 2 for masked dims; pass
-        # through unchanged for mask=False dims.
-        denormed = mean + a * (span / 2.0)
+        denormed = q01 + (a + 1.0) * 0.5 * span
         return np.where(mask, denormed, a).astype(np.float32)
 
     def _convert_gripper(self, a: np.ndarray) -> np.ndarray:
@@ -364,7 +370,9 @@ class DomainAdapter:
                 f"deploy.proprio.adapt.output_dim={cfg.proprio.adapt.output_dim} != "
                 f"expected_proprio_dim={cfg.ckpt.expected_proprio_dim}"
             )
-        # Frame compatibility (hard-fail unless wire_only_smoke=True).
+        # Frame + gripper compatibility (hard-fail unless wire_only_smoke=True).
+        # Spec §Section 4 step 4: frame mismatch + gripper degeneracy both
+        # required to fire.
         if (
             cfg.action.native.frame != cfg.action.contract.frame
             and cfg.action.frame_conversion.method == "none"
@@ -374,6 +382,18 @@ class DomainAdapter:
                 f"native.frame={cfg.action.native.frame!r} != contract.frame="
                 f"{cfg.action.contract.frame!r} with frame_conversion=none. "
                 "Set wire_only_smoke=true to bypass for smoke testing."
+            )
+        n_g = cfg.action.native.gripper
+        c_g = cfg.action.contract.gripper
+        if n_g.sign.open == n_g.sign.closed and not cfg.wire_only_smoke:
+            raise HardFailAssertion(
+                f"native.gripper.sign.open == sign.closed ({n_g.sign.open}); "
+                "gripper remap is degenerate"
+            )
+        if c_g.sign.open == c_g.sign.closed and not cfg.wire_only_smoke:
+            raise HardFailAssertion(
+                f"contract.gripper.sign.open == sign.closed ({c_g.sign.open}); "
+                "gripper remap is degenerate"
             )
         # Wrist requirement (hard / soft path, per spec §Section 5 line 354)
         bridge_or_dinov2 = (
