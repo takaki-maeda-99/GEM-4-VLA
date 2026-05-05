@@ -14,7 +14,6 @@ import io
 import json
 import logging
 
-import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
@@ -161,13 +160,27 @@ def test_predict_hard_required_wrist_missing_at_request_returns_422(tmp_path):
 
 def test_inject_sleep_emits_latency_budget_exceeded(slow_client, caplog):
     """Server still returns 200 within MimicRec's 5s timeout, but the log
-    line carries latency_budget_exceeded=true. Phase 0 acceptance gate item 4."""
+    line carries latency_budget_exceeded=true at WARNING level (spec §6).
+    Phase 0 acceptance gate item 4."""
     caplog.set_level(logging.INFO, logger="vla_project.deployment")
     r = slow_client.post("/predict", json=_valid_request_body())
     assert r.status_code == 200
-    # Find the per-request log line emitted by inference_server._log_request.
-    matched = [rec for rec in caplog.records if rec.name == "vla_project.deployment"]
-    assert matched, "expected at least one log record from vla_project.deployment"
-    payload = json.loads(matched[-1].getMessage())
-    assert payload.get("latency_budget_exceeded") is True
+    # Find the over-budget OK request log specifically — not just the last record.
+    over_budget_records = []
+    for rec in caplog.records:
+        if rec.name != "vla_project.deployment":
+            continue
+        try:
+            p = json.loads(rec.getMessage())
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if p.get("outcome") == "ok" and p.get("latency_budget_exceeded") is True:
+            over_budget_records.append((rec, p))
+    assert over_budget_records, (
+        "expected at least one outcome=ok log with latency_budget_exceeded=True"
+    )
+    rec, payload = over_budget_records[-1]
     assert payload["elapsed_ms"] > 266.0
+    assert rec.levelno == logging.WARNING, (
+        f"over-budget OK response must log at WARNING (spec §6); got {rec.levelname}"
+    )
