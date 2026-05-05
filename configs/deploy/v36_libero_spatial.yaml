@@ -1,0 +1,58 @@
+# configs/deploy/v36_libero_spatial.yaml
+# Pairs with: training configs/train/libero_spatial_v36.yaml + a MimicRec
+# contract YAML with response.action.normalization.method=none
+# (see configs/deploy/mimicrec_pairing_example.yaml for one such contract).
+ckpt:
+  expected_unnorm_key: libero_spatial_no_noops
+  expected_action_chunk_len: 8
+  expected_action_dim: 7
+  expected_proprio_dim: 8
+request_fields:
+  scene_image: image_primary
+  wrist_image: image_wrist
+  proprio: proprio
+  instruction: instruction
+proprio:
+  source:
+    components:
+      - { name: joint_pos,   dims: 6, units: deg }
+      - { name: gripper_pos, dims: 1, units: normalized_neg1_pos1 }
+    total_dim: 7
+  adapt:
+    steps:
+      - { op: deg_to_rad, source: joint_pos, dims: 6 }
+      - { op: copy,       source: gripper_pos, dims: 1 }
+      - { op: pad_zeros,  dims: 1 }
+    output_dim: 8
+  normalization:
+    method: q99
+    stats_key: proprio
+action:
+  native:
+    units: meter_axisangle_rad
+    frame: world
+    gripper:
+      kind: absolute
+      units: normalized_0_1
+      sign: { closed: 0, open: 1 }
+  contract:
+    units: meter_axisangle_rad
+    frame: ee_local
+    gripper:
+      kind: absolute
+      units: normalized_0_1
+      sign: { closed: 0, open: 1 }
+  denormalization:
+    method: q99
+    stats_key: action
+  frame_conversion:
+    method: none
+holdposition:
+  gripper_native_midpoint: 0.5
+wire_only_smoke: true   # v36 native frame=world ≠ contract.frame=ee_local; this server is for
+                        # smoke testing only until a contract-frame-trained ckpt exists.
+runtime:
+  device: cuda:0
+  dtype: bf16
+  torch_compile: "off"
+  warmup_iters: 1
