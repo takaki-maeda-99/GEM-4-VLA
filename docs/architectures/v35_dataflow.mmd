@@ -1,0 +1,76 @@
+%%{init: {"flowchart": {"htmlLabels": true, "curve": "linear"}, "themeVariables": {"fontSize": "14px"}}}%%
+graph LR
+    %% ============= RLDS SUITE SOURCES =============
+    subgraph RLDSDir["💾 modified_libero_rlds (4 LIBERO suites)"]
+        RDS_S["libero_spatial_no_noops/<br/>1.0.0/ tfrecords"]
+        RDS_O["libero_object_no_noops/<br/>1.0.0/ tfrecords"]
+        RDS_G["libero_goal_no_noops/<br/>1.0.0/ tfrecords"]
+        RDS_10["libero_10_no_noops/<br/>1.0.0/ tfrecords"]
+    end
+
+    %% ============= SHARED Q99 STATS =============
+    subgraph SharedStats["📊 shared_stats_path (NEW in v35)"]
+        STATS["libero_combined_q99/<br/>dataset_statistics.json<br/>· q01/q99 = MIN/MAX over 4 suites<br/>· mean/std = pooled by num_transitions<br/>· 273 K transitions / 1693 trajectories"]
+    end
+
+    %% ============= PER-CHILD RLDS DATASET =============
+    subgraph Child0["RLDSLiberoDataset(domain_id=0)"]
+        C0_BUILD["_build_rlds w/ shared_stats:<br/>1. make_dataset_from_rlds(name=spatial,<br/>   action_proprio_norm=BOUNDS_Q99,<br/>   dataset_statistics=combined_q99)<br/>2. apply_trajectory_transforms (window=1, future=7)<br/>3. .flatten() → frame stream<br/>4. .shuffle(256000)<br/>5. apply_frame_transforms (resize 224)"]
+        C0_TAG["each sample tagged<br/>domain_id=0"]
+    end
+    subgraph Child1["RLDSLiberoDataset(domain_id=1)"]
+        C1_BUILD["same pipeline,<br/>name=libero_object,<br/>shared stats = combined_q99"]
+        C1_TAG["domain_id=1"]
+    end
+    subgraph Child2["RLDSLiberoDataset(domain_id=2)"]
+        C2_BUILD["name=libero_goal"]
+        C2_TAG["domain_id=2"]
+    end
+    subgraph Child3["RLDSLiberoDataset(domain_id=3)"]
+        C3_BUILD["name=libero_10"]
+        C3_TAG["domain_id=3"]
+    end
+
+    RDS_S --> C0_BUILD
+    RDS_O --> C1_BUILD
+    RDS_G --> C2_BUILD
+    RDS_10 --> C3_BUILD
+    STATS --> C0_BUILD
+    STATS --> C1_BUILD
+    STATS --> C2_BUILD
+    STATS --> C3_BUILD
+
+    %% ============= WMD SAMPLER =============
+    subgraph WMD["WeightedMultiDataset (per-step random pick)"]
+        WMD_LOGIC["__iter__: each step<br/>idx ~ Categorical(p=[0.25, 0.25, 0.25, 0.25])<br/>yield next(iters[idx])"]
+    end
+
+    C0_BUILD --> C0_TAG --> WMD
+    C1_BUILD --> C1_TAG --> WMD
+    C2_BUILD --> C2_TAG --> WMD
+    C3_BUILD --> C3_TAG --> WMD
+    WMD --> WMD_LOGIC
+
+    %% ============= COLLATION =============
+    WMD_LOGIC --> RAW["per-sample dict:<br/>{ scene_image, wrist_image,<br/>  proprio (8,) float32 normalized [-1,+1],<br/>  target_action (8, 7) normalized,<br/>  action_mask, prompt_input_ids (20,),<br/>  prompt_attention_mask, language str,<br/>  domain_id (scalar long),<br/>  last_action_chunk (8,7) zeros }"]
+    RAW --> COLLATE["RLDSLiberoDataset.collate_fn<br/>stacks into (B=8, ...) tensors"]
+    COLLATE --> BATCH["batch dict:<br/>scene_image (B,3,224,224)<br/>wrist_image (B,3,224,224)<br/>proprio (B, 8)<br/>target_action (B, 8, 7)<br/>prompt_input_ids (B, 20)<br/>domain_id (B,) long ← per-sample mix"]
+
+    %% ============= POLICY FORWARD =============
+    BATCH --> POLICY["VLAPolicy.forward<br/>· vision_encoder(scene_image)<br/>· DA-2-MLP routes per domain_id row<br/>· soft_prompt_hub(domain_id) → 32-token prefix<br/>· LLM forward (LoRA active)<br/>· action_head + DA-2-MLP action_decoder"]
+    POLICY --> PRED["pred (B, 8, 7) shared-Q99 normalized"]
+
+    %% ============= LOSS =============
+    PRED --> LOSS["F.l1_loss(pred, target_action) · action_mask<br/>(target already shared-Q99 normalized via RLDS pipeline)"]
+
+    %% ============= STYLES =============
+    classDef src fill:#dfe7df,stroke:#3a6a3a,color:#1a3a1a
+    classDef stats fill:#fef5e6,stroke:#a36b00,color:#3b2700
+    classDef child fill:#cfe5ff,stroke:#1e6091,color:#0a1f33
+    classDef sample fill:#f5f5f5,stroke:#666,color:#222
+    classDef policy fill:#ffe6a8,stroke:#a36b00,color:#3b2700
+    class RDS_S,RDS_O,RDS_G,RDS_10 src
+    class STATS,SharedStats stats
+    class C0_BUILD,C1_BUILD,C2_BUILD,C3_BUILD,Child0,Child1,Child2,Child3,C0_TAG,C1_TAG,C2_TAG,C3_TAG,WMD_LOGIC child
+    class RAW,COLLATE,BATCH,PRED sample
+    class POLICY,LOSS policy

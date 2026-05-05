@@ -1,0 +1,131 @@
+%%{init: {"flowchart": {"htmlLabels": true, "curve": "linear"}, "themeVariables": {"fontSize": "14px"}}}%%
+graph TD
+    %% ============= INPUTS =============
+    subgraph Inputs["📥 Inputs (per sample)"]
+        SCENE["scene_image<br/>(256, 256, 3) uint8<br/>180° rotated"]
+        WRIST["wrist_image<br/>(256, 256, 3) uint8<br/>180° rotated"]
+        PROMPT["language prompt<br/>str"]
+        PROPRIO["proprio<br/>(8,) float32 raw<br/>(eef_pos[3] + axis_angle[3] + gripper_qpos[2])"]
+    end
+
+    %% ============= VISION (FROZEN) =============
+    subgraph Vision["🔒 Vision encoders (frozen)"]
+        SIGLIP["SigLIP-So400m timm<br/>vit_so400m_patch14_siglip_224.v2_webli<br/>27 blocks · embed=1152"]
+        DINO["DINOv2-base HF<br/>facebook/dinov2-base<br/>embed=768"]
+    end
+
+    %% ============= IMAGE PREPROCESS =============
+    PRE_S["lanczos3 256→224<br/>+ SigLIP transform<br/>(Resize 248 + CC 224 + Normalize 0.5)"]
+    PRE_W["same SigLIP preproc"]
+    PRE_S_DINO["DINOv2 transform<br/>→ (3, 224, 224) [-mean]/std"]
+    PRE_W_DINO["DINOv2 transform"]
+
+    SCENE --> PRE_S
+    SCENE --> PRE_S_DINO
+    WRIST --> PRE_W
+    WRIST --> PRE_W_DINO
+    PRE_S --> SIGLIP
+    PRE_W --> SIGLIP
+    PRE_S_DINO --> DINO
+    PRE_W_DINO --> DINO
+
+    SIGLIP --> SCENE_TOK["scene_tok<br/>(B, 256, 1152)"]
+    SIGLIP --> WRIST_SIGLIP["wrist_tok_siglip<br/>(B, 256, 1152)"]
+    SIGLIP --> WRIST_LAST["wrist_tok_raw<br/>(B, 256, 1152)<br/>SigLIP final"]
+
+    DINO --> DINO_SCENE["dino_scene<br/>(B, 256, 768)"]
+    DINO --> DINO_WRIST_LLM["dino_wrist_llm<br/>(B, 256, 768)"]
+
+    %% ============= ABOVE-LLM PROJECTORS =============
+    subgraph AboveLLM["🔥 Above-LLM (trainable + warmup)"]
+        FUSE_SCENE["concat<br/>scene_fused (B, 256, 1920)"]
+        FUSE_WRIST["concat<br/>wrist_fused (B, 256, 1920)"]
+        FUSE_VIS["concat dim=1<br/>fused_vis (B, 512, 1920)"]
+        SCENE_PROJ["scene_wrist_dinov2_llm_proj<br/>BaselineSceneProjector 3-MLP<br/>1920 → 8192 → 1536 → 1536<br/>~33 M params, GELU×2"]
+        AQ["action_query_hub.queries<br/>(64, 1536) zero-init<br/>~98 K params"]
+    end
+
+    SCENE_TOK --> FUSE_SCENE
+    DINO_SCENE --> FUSE_SCENE
+    WRIST_SIGLIP --> FUSE_WRIST
+    DINO_WRIST_LLM --> FUSE_WRIST
+    FUSE_SCENE --> FUSE_VIS
+    FUSE_WRIST --> FUSE_VIS
+    FUSE_VIS --> SCENE_PROJ
+    SCENE_PROJ --> SCENE_E["scene_e<br/>(B, 512, 1536)"]
+    AQ --> ACTION_E["action_q_e<br/>(B, 64, 1536)"]
+
+    %% ============= LLM INPUT BUILD =============
+    PROMPT --> TOK["GemmaPromptTokenizer<br/>max_len=20<br/>'What action should the robot take to {lang}?'"]
+    TOK --> PROMPT_IDS["prompt_input_ids<br/>(B, 20)"]
+
+    subgraph InputPack["InputPacker (vision_placeholder_mode=unused_range)"]
+        IP["[BOS] + prompt(20) + scene-placeholder(512) + propriop(1) + action(64) + [EOS]<br/>= 599 token IDs<br/>scene 位置: 258949..259460 (512 unique unused IDs)"]
+    end
+    PROMPT_IDS --> IP
+
+    %% ============= LLM =============
+    subgraph LLM["🧊+🔥 LLM = Gemma4-E2B (frozen base + LoRA)"]
+        EMBED["embed_tokens<br/>(599, 1536)"]
+        SCATTER["scatter scene_e at vision-pos<br/>scatter action_q_e at action-pos"]
+        PLE["get_per_layer_inputs<br/>(B, 599, 35, ple_dim=256)<br/>computed from input_ids"]
+        GEMMA["Gemma4TextModel · 35 layers<br/>frozen + LoRA q_proj/v_proj r=16 α=32<br/>~3.4 M LoRA params trainable<br/>NO no_grad-wrap (LoRA needs grad)"]
+        HS["hidden_states tuple<br/>(B, 36, 599, 1536)"]
+    end
+
+    IP --> EMBED
+    IP --> PLE
+    EMBED --> SCATTER
+    SCENE_E --> SCATTER
+    ACTION_E --> SCATTER
+    SCATTER --> GEMMA
+    PLE --> GEMMA
+    GEMMA --> HS
+
+    %% ============= BELOW-LLM PREP =============
+    subgraph BelowLLM["🔥 Below-LLM action head input prep (trainable, no warmup)"]
+        SLICE_HA["slice action positions<br/>h_a (B, 25, 64, 1536)"]
+        SLICE_HT["slice vision positions<br/>h_t (B, 25, 512, 1536)"]
+        WRIST_PROJ["wrist_proj DA-Linear<br/>(1152→1536) ~1.8 M"]
+        H_W["h_w (B, 256, 1536)"]
+        PROP_PROJ["proprio_proj BaselineProprioProjector<br/>2-MLP 8→1536→1536, GELU<br/>~2.4 M params"]
+        P["p (B, 1, 1536)"]
+    end
+
+    HS --> SLICE_HA
+    HS --> SLICE_HT
+    WRIST_LAST --> WRIST_PROJ
+    WRIST_PROJ --> H_W
+    PROPRIO --> PROP_PROJ
+    PROP_PROJ --> P
+
+    %% ============= ACTION HEAD =============
+    subgraph ActionHead["🔥 Action head · 24 × MLPResNetBlock_Pro (trainable, no warmup)"]
+        X_INIT["x_init = zeros(B, 8, 7×1536=10752)<br/>+ 0.02·randn (training only)"]
+        LN1_FC1["LN(10752) + fc1(10752→1536) + ReLU<br/>→ (B, 8, 1536)"]
+        POOL_CONCAT["if h_w is not None and bridge OFF:<br/>x = cat([x, h_w], dim=1)<br/>→ (B, 8+256=264, 1536)"]
+        BLOCK["block_i (× 24) MLPResNetBlock_Pro:<br/>3-stream attention<br/>q from x; k_self/v_self from x<br/>k_adapter/v_adapter from h_a[:, i+1] ⊕ p<br/>k_task/v_task from h_t[:, i+1] (512 tokens)<br/>RoPE on q + each k_*<br/>tanh(g_task) gating on task stream<br/>+ FFN (LN + Linear D→D + ReLU)<br/>NO wrist branch (use_wrist_bridge=False)"]
+        TRIM["x[:, :8, :] (drop pool tokens)"]
+        LN2_FC2["LN(1536) + fc2(1536→7) → (B, 8, 7)<br/>action_decoder = Passthrough"]
+    end
+
+    X_INIT --> LN1_FC1 --> POOL_CONCAT --> BLOCK --> TRIM --> LN2_FC2
+    H_W --> POOL_CONCAT
+    SLICE_HA --> BLOCK
+    SLICE_HT --> BLOCK
+    P --> BLOCK
+
+    %% ============= OUTPUT =============
+    LN2_FC2 --> PRED["predicted action chunk<br/>(B, 8, 7)<br/>Q99-normalized"]
+    PRED --> LOSS["F.l1_loss(pred, target_action)<br/>masked by action_mask"]
+
+    %% ============= STYLES =============
+    classDef frozen fill:#cfe5ff,stroke:#1e6091,color:#0a1f33
+    classDef trainable fill:#ffe6a8,stroke:#a36b00,color:#3b2700
+    classDef io fill:#dfe7df,stroke:#3a6a3a,color:#1a3a1a
+    classDef tensor fill:#f5f5f5,stroke:#666,color:#222
+    classDef header fill:#fef5e6,stroke:#a36b00,color:#3b2700
+    class SIGLIP,DINO,Vision,EMBED,GEMMA frozen
+    class SCENE_PROJ,AQ,PROP_PROJ,WRIST_PROJ,BLOCK,LN1_FC1,LN2_FC2 trainable
+    class SCENE,WRIST,PROMPT,PROPRIO,LOSS,PRED io
+    class SCENE_TOK,WRIST_SIGLIP,WRIST_LAST,DINO_SCENE,DINO_WRIST_LLM,SCENE_E,ACTION_E,FUSE_SCENE,FUSE_WRIST,FUSE_VIS,PROMPT_IDS,IP,HS,SLICE_HA,SLICE_HT,H_W,P,X_INIT,POOL_CONCAT,TRIM,SCATTER,PLE tensor
