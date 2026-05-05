@@ -27,3 +27,6 @@ htmlcov/
 # Local env files
 .env
 .envrc
+
+# codex CLI session sentinel (created when codex review/exec runs in this repo)
+.codex

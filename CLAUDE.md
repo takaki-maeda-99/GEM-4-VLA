@@ -687,3 +687,30 @@ dataset -> collator -> model.forward -> loss
 For policy changes, verify:
 
 observation -> policy.select_action -> executable action
+
+# Code Review Workflow
+
+Use the local `codex` CLI (model: `gpt-5.5`) as a peer reviewer at the following checkpoints. Do not skip — the user has explicitly asked for this cadence.
+
+## When to invoke
+
+| Checkpoint | Command |
+|---|---|
+| After writing a design spec under `docs/superpowers/specs/` (file is untracked or staged) | `codex review --uncommitted` |
+| After writing an implementation plan under `docs/superpowers/plans/` (file is untracked or staged) | `codex review --uncommitted` |
+| Before each commit during implementation | `codex review --uncommitted` |
+| Before opening or merging a PR | `codex review --base main` |
+
+`codex review` cannot take an explicit file path; it reviews the diff scope (`--uncommitted`, `--base <branch>`, or `--commit <sha>`). If you need to focus codex on a specific file, isolate it as the only changed file before invoking, or pass `--title` to anchor the review header. Note that codex review **rejects** any positional `[PROMPT]` argument when used with `--uncommitted` / `--base` — pass guidance via `--title` instead.
+
+## How to use the output
+
+- Treat codex output as a **second opinion**, not authority. Resolve findings via the `superpowers:receiving-code-review` skill (verify each claim against the code; technical correctness wins over agreement).
+- If codex flags something the human user has already approved, surface it briefly but do not silently revert the approved decision.
+- Do not auto-apply codex suggestions. Read, evaluate, then decide.
+
+## Configuration
+
+- Default model is set in `~/.codex/config.toml` (`model = "gpt-5.5"`).
+- Per-invocation override: `codex review -c model="gpt-5.5" --uncommitted`.
+- If `codex` is unavailable in the environment, surface this to the user before proceeding past a checkpoint that requires it; do not silently skip.
