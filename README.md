@@ -4,17 +4,29 @@ X-VLA / VLA-Adapter style Vision-Language-Action policy on top of
 **SigLIP + Gemma4-E2B + per-domain projectors + L1 action head**, targeting
 LIBERO benchmarks and (eventually) real-robot deployment.
 
-Current SOTA on `LIBERO-Spatial`:
+## Results — `LIBERO-Spatial` (50 ep / suite, headless MuJoCo)
 
-| version | architecture                                               | step  | SR (50 ep) |
-|---------|------------------------------------------------------------|-------|------------|
-| native baseline (vla-gemma-4) | ResNet-18 wrist + Gemma4 + L1 head           | 10000 | 42 % |
-| **v25** | Mode B + image preproc fix + warmup gripper                | 10000 | **74 %** |
-| v28     | LoRA r=16 + AQ trainable + X-VLA two-step warmup           | 10000 | 60 % |
+| version | architecture                                               | best step | peak SR | step_10000 |
+|---------|------------------------------------------------------------|-----------|---------|------------|
+| baseline (vla-gemma-4) | ResNet-18 wrist + Gemma4 + L1 head            | 10000     | 42 %    | 42 % |
+| v25     | Mode B + image preproc fix + warmup gripper                | 10000     | 74 %    | 74 % |
+| v28     | LoRA r=16 + AQ trainable + two-step warmup                 | 7500      | 64 %    | 60 % |
+| v30     | v28 + tweaks                                               | 7500      | 70 %    | 32 % |
+| v31     | SigLIP + DINOv2 scene + wrist-into-LLM (no LoRA)           | 10000     | 36 %    | 36 % |
+| v32     | v31 + LoRA + AQ trainable (max_steps=20000)                | 17500     | 76 %    | 72 % |
+| **v33** | **DA-2-MLP + soft-prompt-in-LLM + LoRA r=64 (40000 steps)**| **40000** | **94 %**| 24 % |
 
-In flight: **v33** (DA-2-MLP + soft prompt LLM injection + LoRA r=64,
-loss 0.113), **v34/v35** (4-suite multi-domain RLDS), **v36** (π₀-style
-wrist-in-LLM with fixed slot + mask + view-dropout).
+v33 trajectory: 5k → 16% / 10k → 24% / 15k → 66% / 20k → 74% / 25k → 62% /
+30k → 80% / 35k → 84% / **40k → 94 %** (47/50). Soft prompts + DA-MLP + bigger
+LoRA need long training to ramp; pre-20k SR is misleading.
+
+In flight (no eval yet):
+
+- **v34 / v35** — 4-suite multi-domain RLDS (v35 = shared Q99 stats fix).
+  v34 step_40000 spatial = 2 % so far → multi-domain still under-trained or
+  needs different schedule.
+- **v36** — v33 base + π₀-style wrist-into-LLM (fixed 256-tok slot + mask +
+  view-dropout 0.3); wrist_bridge path dropped. Currently training on dl40 GPU 4.
 
 ## Setup
 
