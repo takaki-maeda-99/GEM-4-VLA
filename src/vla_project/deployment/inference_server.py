@@ -15,6 +15,8 @@ from typing import Literal
 
 import numpy as np
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 
 from vla_project.deployment.domain_adapter import (
     DomainAdapter,
@@ -120,21 +122,35 @@ def build_app(
             "ready_at_ns": state["ready_at_ns"],
         }
 
+    # Pydantic body-validation errors fire BEFORE the route body, so attach
+    # an exception handler that logs them through our structured channel
+    # rather than letting FastAPI's default 422 responder swallow the event.
+    @app.exception_handler(RequestValidationError)
+    async def _on_validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
+        request_id = request.headers.get("X-Request-Id") or uuid.uuid4().hex
+        _log_request(
+            request_id, elapsed_ms=0.0, state=state, domain_id=domain_id,
+            outcome="invalid_request",
+            error_class="RequestValidationError",
+            error_msg=str(exc.errors()),
+        )
+        return JSONResponse(status_code=422, content={"detail": exc.errors()})
+
     @app.post("/predict", response_model=PredictResponse)
     async def predict(req: PredictRequest, request: Request) -> PredictResponse:
         request_id = request.headers.get("X-Request-Id") or uuid.uuid4().hex
         t0 = time.monotonic_ns()
-        outcome: str = "ok"
-        error_class: str | None = None
-        error_msg: str | None = None
         try:
             obs = adapter.preprocess(req)
-        except (ValueError, AssertionError) as e:
-            outcome = "invalid_request"
-            error_class = type(e).__name__
-            error_msg = str(e)
+        except Exception as e:  # noqa: BLE001 — invalid input is broad: ValueError, AssertionError,
+            # binascii.Error (bad base64), PIL.UnidentifiedImageError (bad JPEG), etc.
             elapsed_ms = (time.monotonic_ns() - t0) / 1e6
-            _log_request(request_id, elapsed_ms, state, outcome, error_class, error_msg)
+            _log_request(
+                request_id, elapsed_ms, state, domain_id,
+                outcome="invalid_request",
+                error_class=type(e).__name__,
+                error_msg=str(e),
+            )
             raise HTTPException(status_code=422, detail=str(e)) from e
 
         # Optional injected sleep for slow-path smoke (test-only).
@@ -144,35 +160,39 @@ def build_app(
 
         try:
             native = predictor.predict(obs)
-        except NotImplementedError as e:
-            outcome = "predictor_error"
-            error_class = "NotImplementedError"
-            error_msg = str(e)
+        except Exception as e:  # noqa: BLE001 — NotImplementedError (Phase 0 stub) + torch errors
             elapsed_ms = (time.monotonic_ns() - t0) / 1e6
-            _log_request(request_id, elapsed_ms, state, outcome, error_class, error_msg)
-            raise HTTPException(status_code=500, detail=str(e)) from e
-        except Exception as e:  # noqa: BLE001
-            outcome = "predictor_error"
-            error_class = type(e).__name__
-            error_msg = str(e)
-            elapsed_ms = (time.monotonic_ns() - t0) / 1e6
-            _log_request(request_id, elapsed_ms, state, outcome, error_class, error_msg)
+            _log_request(
+                request_id, elapsed_ms, state, domain_id,
+                outcome="predictor_error",
+                error_class=type(e).__name__,
+                error_msg=str(e),
+                exc_info=True,
+            )
             raise HTTPException(status_code=500, detail=str(e)) from e
 
         try:
             if np.isnan(native).any():
-                raise ValueError("predictor emitted NaN")
+                raise ValueError("predictor emitted NaN before postprocess")
             actions = adapter.postprocess(native)
-        except (ValueError, AssertionError, NotImplementedError) as e:
-            outcome = "postprocess_error"
-            error_class = type(e).__name__
-            error_msg = str(e)
+            # Spec-mandated NaN guard on the FINAL response actions
+            # (postprocess can introduce NaN via gripper conversion / denorm).
+            if any(any(_v != _v for _v in row) for row in actions):  # NaN check via != self
+                raise ValueError("postprocess emitted NaN in final actions")
+        except Exception as e:  # noqa: BLE001
             elapsed_ms = (time.monotonic_ns() - t0) / 1e6
-            _log_request(request_id, elapsed_ms, state, outcome, error_class, error_msg)
+            _log_request(
+                request_id, elapsed_ms, state, domain_id,
+                outcome="postprocess_error",
+                error_class=type(e).__name__,
+                error_msg=str(e),
+                exc_info=True,
+            )
             raise HTTPException(status_code=500, detail=str(e)) from e
 
         elapsed_ms = (time.monotonic_ns() - t0) / 1e6
-        _log_request(request_id, elapsed_ms, state, outcome, None, None)
+        _log_request(request_id, elapsed_ms, state, domain_id, outcome="ok",
+                     error_class=None, error_msg=None)
         return PredictResponse(actions=actions)
 
     return app
@@ -182,24 +202,34 @@ def _log_request(
     request_id: str,
     elapsed_ms: float,
     state: dict,
+    domain_id: int,
     outcome: str,
     error_class: str | None,
     error_msg: str | None,
+    *,
+    exc_info: bool = False,
 ) -> None:
     payload = {
         "ts_ns": time.monotonic_ns(),
         "request_id": request_id,
         "elapsed_ms": round(elapsed_ms, 3),
         "predictor": state["predictor_class"],
+        "domain_id": domain_id,
         "outcome": outcome,
     }
-    if elapsed_ms > _LATENCY_BUDGET_MS:
+    over_budget = elapsed_ms > _LATENCY_BUDGET_MS
+    if over_budget:
         payload["latency_budget_ms"] = _LATENCY_BUDGET_MS
         payload["latency_budget_exceeded"] = True
     if error_class:
         payload["error_class"] = error_class
         payload["error_msg"] = error_msg
-    if outcome != "ok":
-        logger.warning(json.dumps(payload))
+    msg = json.dumps(payload)
+    if outcome in ("predictor_error", "postprocess_error"):
+        # Spec §6: 500 paths get error-level + full traceback (exc_info=True
+        # forwards the active exception to the handler).
+        logger.error(msg, exc_info=exc_info)
+    elif outcome == "invalid_request" or over_budget:
+        logger.warning(msg)
     else:
-        logger.info(json.dumps(payload))
+        logger.info(msg)
