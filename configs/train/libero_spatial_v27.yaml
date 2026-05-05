@@ -1,0 +1,99 @@
+# V26: v25 baseline-equivalent + LoRA on Gemma + trainable action_queries.
+#
+# v25 (Mode B exact = freeze_llm_and_aq=true) reached 37/50 = 74% LIBERO-Spatial
+# with everything in the LLM strictly frozen. v26 layers Mode A on top:
+#   - Gemma4 LoRA (q_proj + v_proj, r=16, alpha=32) — small adapter so the LLM
+#     can shift its action-position hidden states toward the loss target
+#   - action_query_hub.queries trainable from zero init — AQ can deviate from
+#     "empty placeholder" once the LoRA shape stabilizes
+#
+# LLM warmup curriculum (matches the X-VLA two-step adaptation pattern):
+#   - step 0..freeze_steps:           gemma_lora group lr = 0 (LLM fully frozen)
+#   - step freeze_steps..(+warmup):   linear ramp lr 0 → base_lr
+#   - step (freeze_steps+warmup)..:   constant base_lr (min_lr_ratio=1.0)
+# Other groups (action_queries / projections / action_head) stay at constant
+# base_lr the whole time. The ``freeze_group_names`` / ``schedule_group_names``
+# defaults already gate this.
+#
+# Notes vs v25:
+#   - ``freeze_llm_and_aq: false`` (legacy alias) — replaced by:
+#       freeze_action_queries: false (AQ now trainable)
+#       wrap_llm_in_no_grad: false   (LoRA needs grad through LLM)
+#   - ``compat_profile: x_vla_adapter`` — not vla_gemma4_baseline (Mode A diverges)
+#   - Memory: no_grad wrap removed → LLM activations stored. Likely needs to
+#     drop bs back from 16 to 8 (or enable use_grad_checkpoint=true for the
+#     LLM, but Gemma4 GC has the HF #45242 issue — skip for now). Conservative:
+#     bs=8 first.
+#
+# Launch (gemma4 venv, 2-GPU bs=8 = effective 16):
+#   CUDA_VISIBLE_DEVICES=3,4 \
+#   PYTHONPATH=/misc/dl00/takaki/X-VLA-Adapter/src:\
+#     /misc/dl00/takaki/vla-gemma-4/VLA-Adapter:\
+#     /misc/dl00/takaki/vla-gemma-4 \
+#   /misc/dl00/takaki/vla-gemma-4/.venv-gemma4/bin/python \
+#     -m accelerate.commands.launch \
+#     --num_processes 2 --num_machines 1 --multi_gpu --mixed_precision no \
+#     --main_process_port 29514 \
+#     /misc/dl00/takaki/X-VLA-Adapter/scripts/train.py \
+#     /misc/dl00/takaki/X-VLA-Adapter/configs/train/libero_spatial_v27.yaml
+seed: 0
+model:
+  num_domains: 1
+  compat_profile: x_vla_adapter   # Mode A diverges from vla_gemma4_baseline assertion
+  hidden_dim: 1536
+  num_blocks: 24
+  use_grad_checkpoint: true
+  use_wrist_bridge: true
+  ungated_streams: false
+  use_soft_prompt: false
+  prompt_max_len: 20
+  use_baseline_projectors: true
+  baseline_scene_init_proj_dim: 8192
+  vision_placeholder_mode: unused_range
+  freeze_llm_and_aq: false                # disable Mode B
+  freeze_action_queries: false            # AQ trainable
+  wrap_llm_in_no_grad: false              # LoRA needs grad through LLM
+  lora:
+    r: 16
+    alpha: 32
+    target_modules: [q_proj, v_proj]
+    dropout: 0.0
+vision:
+  type: timm
+  model_name: google/siglip-so400m-patch14-224
+language:
+  model_name: google/gemma-4-E2B
+data:
+  type: libero_rlds
+  data_dir: /misc/dl00/takaki/vla-gemma-4/data/modified_libero_rlds
+  dataset_name: libero_spatial_no_noops
+  action_chunk_len: 8
+  shuffle_buffer_size: 256000
+  train: true
+  domain_id: 0
+  seed: 42
+  unnorm_key: libero_spatial_no_noops
+  stats_path: /misc/dl00/takaki/vla-gemma-4/VLA-Adapter/outputs/LIBERO-Spatial-Pro/dataset_statistics.json
+train:
+  batch_size: 8                            # halved vs v25 — LLM activations stored
+  lr: 2.0e-4
+  weight_decay: 0.01
+  max_steps: 10000
+  freeze_steps: 0                          # constant lr from step 0
+  warmup_steps: 0                          # no linear warmup
+  min_lr_ratio: 1.0                        # constant after warmup (no cosine decay)
+  grad_clip_norm: 1.0
+  lr_coefs:
+    gemma_lora:     1.0                    # full base_lr post-warmup (was 0.0 in v25)
+    siglip:         0.0                    # SigLIP stays frozen
+    soft_prompts:   0.0                    # no soft prompt hub
+    action_queries: 1.0
+    projections:    1.0
+    action_head:    1.0
+  save_every: 2500
+  save_dir: outputs/libero_spatial_v27/checkpoints
+wandb:
+  enabled: true
+  project: vla-project
+  name: libero_spatial_v27_lora_aq
+  tags: [libero_spatial, rlds, mode_a, lora, aq_trainable, wrist_bridge, baseline_arch, timm, unused_range]

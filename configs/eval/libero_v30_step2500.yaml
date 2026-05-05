@@ -1,0 +1,44 @@
+seed: 7
+checkpoint:
+  path: outputs/libero_spatial_v30/checkpoints/step_2500
+model:
+  num_domains: 1
+  compat_profile: x_vla_adapter
+  hidden_dim: 1536
+  num_blocks: 24
+  use_grad_checkpoint: false
+  use_wrist_bridge: true
+  ungated_streams: false
+  use_soft_prompt: false
+  prompt_max_len: 20
+  use_baseline_projectors: true
+  baseline_scene_init_proj_dim: 8192
+  vision_placeholder_mode: unused_range
+  freeze_llm_and_aq: false
+  freeze_action_queries: true
+  wrap_llm_in_no_grad: true
+  wrist_siglip_lora:
+    r: 16
+    alpha: 32
+    target_modules: [qkv]
+    dropout: 0.0
+vision:
+  type: timm
+  model_name: google/siglip-so400m-patch14-224
+language: {model_name: google/gemma-4-E2B}
+data:
+  unnorm_key: libero_spatial_no_noops
+  stats_path: /misc/dl00/takaki/vla-gemma-4/VLA-Adapter/outputs/LIBERO-Spatial-Pro/dataset_statistics.json
+robot:
+  bddl_path_root: /misc/dl00/takaki/vla-gemma-4/LIBERO/libero/libero/bddl_files
+  task_suite: libero_spatial
+  image_size: 256
+  libero_path: ${oc.env:LIBERO_PATH,/misc/dl00/takaki/vla-gemma-4/LIBERO}
+eval:
+  task_idxs: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+  num_episodes_per_task: 5
+  max_steps: 210
+  num_steps_wait: 10
+  video_dir: outputs/libero_spatial_v30/eval_videos_step2500
+  video_ext: mp4
+  video_fps: 10
