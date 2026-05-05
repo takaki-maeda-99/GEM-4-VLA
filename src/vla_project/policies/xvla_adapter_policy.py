@@ -42,9 +42,10 @@ from vla_project.data.normalization import (
     load_q99_proprio_stats,
     load_q99_stats,
     normalize_proprio_q99,
+    q99_stats_from_block,
 )
 from vla_project.data.transforms.action_alignment import action20_to_ee_delta
-from vla_project.data.transforms.image import SiglipImageTransform
+from vla_project.data.transforms.image import DINOv2ImageTransform, SiglipImageTransform
 from vla_project.data.transforms.language import GemmaPromptTokenizer
 from vla_project.models.vla_policy import VLAPolicy
 from vla_project.policies.base_policy import BasePolicy
@@ -83,6 +84,7 @@ class XVLAAdapterPolicy(BasePolicy):
             self.model = torch.compile(self.model, mode=compile_mode, fullgraph=False)
         self.tokenizer = tokenizer
         self.image_transform = image_transform
+        self.dinov2_image_transform = DINOv2ImageTransform(size=C.SIGLIP_IMAGE_SIZE)
         self.norm_stats = norm_stats
         # Proprio normalization (BOUNDS_Q99). When provided, applied at
         # ``_build_batch`` so the model sees the same normalized proprio
@@ -133,11 +135,12 @@ class XVLAAdapterPolicy(BasePolicy):
                 f"checkpoint at {ckpt_dir} has no norm_stats[{unnorm_key!r}]; "
                 f"available: {list((ns or {}).keys())}"
             )
-        a = ns[unnorm_key]["action"]
-        stats = Q99Stats(
-            q01=torch.tensor(a["q01"], dtype=torch.float32),
-            q99=torch.tensor(a["q99"], dtype=torch.float32),
-            mask=torch.tensor(a["mask"], dtype=torch.bool),
+        per_dataset = ns[unnorm_key]
+        stats = q99_stats_from_block(per_dataset["action"])
+        proprio_stats = (
+            q99_stats_from_block(per_dataset["proprio"])
+            if "proprio" in per_dataset
+            else None
         )
         return cls(
             model=model,
@@ -148,19 +151,36 @@ class XVLAAdapterPolicy(BasePolicy):
             compile_mode=compile_mode,
             domain_id=domain_id,
             action_format=action_format,
+            proprio_stats=proprio_stats,
         )
 
     def reset(self) -> None:
         self._buffer.clear()
         self._last_chunk_norm.zero_()
 
-    def _np_image_to_chw(self, img: np.ndarray) -> torch.Tensor:
+    def _np_image_to_chw(self, img: np.ndarray, *, transform: Optional[torch.nn.Module] = None) -> torch.Tensor:
         if img.dtype != np.uint8 or img.ndim != 3 or img.shape[-1] != 3:
             raise ValueError(
                 f"image must be uint8 (H, W, 3); got dtype={img.dtype} shape={img.shape}"
             )
         t = torch.from_numpy(img).permute(2, 0, 1).float() / 255.0
-        return self.image_transform(t)
+        # Train-eval FOV match: RLDS train pipeline resizes images to 224×224
+        # BEFORE the SigLIP transform (Resize 248 + CC 224 — effectively an
+        # upscale-then-crop). LIBERO sim renders at 256×256, so we must also
+        # pre-resize 256→224 here, otherwise the SigLIP transform downscales
+        # 256→248 + crops to 224 = a different field of view than training.
+        # Bicubic+antialias matches the RLDS lanczos-like resize closely
+        # enough; the residual error is dominated by the SigLIP backbone's
+        # low-frequency tolerance.
+        target = C.SIGLIP_IMAGE_SIZE  # 224
+        if t.shape[1] != target or t.shape[2] != target:
+            import torch.nn.functional as F
+            t = F.interpolate(
+                t.unsqueeze(0), size=(target, target),
+                mode="bicubic", antialias=True,
+            ).squeeze(0).clamp(0.0, 1.0)
+        tx = self.image_transform if transform is None else transform
+        return tx(t)
 
     def _qpos_to_gripper_cmd(self, qpos: float) -> float:
         """Map gripper qpos in [closed, open] → command in [-1, +1], clipped.
@@ -191,7 +211,7 @@ class XVLAAdapterPolicy(BasePolicy):
         proprio = proprio.unsqueeze(0).to(device).to(model_dtype)
         prompt = self.tokenizer(obs["language"])
         action_dim_internal = 20 if self.action_format == "ee6d" else C.ACTION_DIM
-        return {
+        batch = {
             "domain_id": torch.tensor([self.domain_id], dtype=torch.long, device=device),
             "scene_image": scene,
             "wrist_image": wrist,
@@ -201,7 +221,22 @@ class XVLAAdapterPolicy(BasePolicy):
             "last_action_chunk": self._last_chunk_norm.unsqueeze(0).to(device).to(model_dtype),
             "target_action": torch.zeros(1, self.action_chunk_len, action_dim_internal, device=device, dtype=model_dtype),
             "action_mask": torch.ones(1, self.action_chunk_len, dtype=torch.bool, device=device),
+            # v36 wrist_in_llm contract: wrist is always present in LIBERO sim,
+            # so mark mask=True. forward()'s default fallback also yields True
+            # when missing, but explicit-belt-and-suspenders here.
+            "wrist_mask": torch.ones(1, dtype=torch.bool, device=device),
         }
+        if getattr(self.model, "wrist_dinov2_encoder", None) is not None:
+            wrist_dino = self._np_image_to_chw(
+                obs["wrist_image"], transform=self.dinov2_image_transform
+            )
+            batch["wrist_image_dinov2"] = wrist_dino.unsqueeze(0).to(device).to(model_dtype)
+            if getattr(self.model.cfg, "use_scene_wrist_dinov2_llm", False):
+                scene_dino = self._np_image_to_chw(
+                    obs["scene_image"], transform=self.dinov2_image_transform
+                )
+                batch["scene_image_dinov2"] = scene_dino.unsqueeze(0).to(device).to(model_dtype)
+        return batch
 
     def _refill_buffer(self, obs: Dict[str, Any]) -> None:
         was_training = self.model.training
@@ -215,8 +250,23 @@ class XVLAAdapterPolicy(BasePolicy):
 
             if self.action_format == "native":
                 denormed = denormalize_action_q99(pred_cpu[0], self.norm_stats)
+                # RLDS-trained models output gripper in the RLDS convention
+                # ([0=close, 1=open], mask=False so it passes through Q99).
+                # LIBERO env expects [-1=open, +1=close]. Apply
+                # normalize_gripper_action ([0,1]→[-1,+1]) + invert
+                # (sign flip), matching upstream
+                # ``run_libero_eval.process_action`` for openvla model_family.
+                # vla-gemma-4 ``eval_libero_gemma4.py:248-264`` does the same.
+                denormed_np = denormed.numpy().astype(np.float32)
+                # gripper transform: 2x-1 then binarize sign, then invert.
+                g = denormed_np[:, -1]
+                g_norm = 2.0 * g - 1.0
+                g_bin = np.sign(g_norm)
+                # zero-handling: sign(0)=0 — round to closed (-1) like baseline
+                g_bin = np.where(g_bin == 0, -1.0, g_bin)
+                denormed_np[:, -1] = -g_bin   # invert
                 for i in range(self.action_chunk_len):
-                    self._buffer.append(denormed[i].numpy().astype(np.float32))
+                    self._buffer.append(denormed_np[i])
                 return
 
             # EE6D: convert each (abs xyz, rot6d, gripper qpos) anchor to a

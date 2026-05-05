@@ -37,3 +37,25 @@ class SiglipImageTransform(nn.Module):
 
     def forward(self, img: torch.Tensor) -> torch.Tensor:
         return self.transform(img.float())
+
+
+class DINOv2ImageTransform(nn.Module):
+    """DINOv2/ImageNet preprocessing for 224x224 ViT/14 patch tokens."""
+
+    MEAN = (0.485, 0.456, 0.406)
+    STD = (0.229, 0.224, 0.225)
+
+    def __init__(self, size: int = 224) -> None:
+        super().__init__()
+        self.transform = T.Compose([
+            T.Resize(
+                size,
+                interpolation=InterpolationMode.BICUBIC,
+                antialias=True,
+            ),
+            T.CenterCrop(size),
+            T.Normalize(self.MEAN, self.STD),
+        ])
+
+    def forward(self, img: torch.Tensor) -> torch.Tensor:
+        return self.transform(img.float())

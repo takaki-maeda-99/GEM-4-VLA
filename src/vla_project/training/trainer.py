@@ -21,6 +21,7 @@ class TrainerConfig:
     max_steps: int = 100
     log_every: int = 10
     grad_clip_norm: float = 1.0
+    gradient_accumulation_steps: int = 1
     save_every: Optional[int] = None  # save every N steps; None disables periodic
     save_dir: Optional[str] = None    # parent dir for step_<N>/ checkpoints
     # LR schedule: linear warmup over `warmup_steps`, then cosine decay to
@@ -98,7 +99,9 @@ class Trainer:
         self.cfg = cfg
         if accelerator is None:
             from accelerate import Accelerator
-            accelerator = Accelerator()
+            from vla_project.training.accelerate_utils import default_ddp_kwargs_handlers
+
+            accelerator = Accelerator(kwargs_handlers=default_ddp_kwargs_handlers())
         self.accelerator = accelerator
 
     def _save(
@@ -156,6 +159,7 @@ class Trainer:
         first_param = next(underlying.parameters())
         device = first_param.device
         model_dtype = first_param.dtype
+        accum_steps = max(1, int(self.cfg.gradient_accumulation_steps))
 
         # Snapshot per-group initial lrs for the scheduler (each group keeps
         # its own coefficient applied via build_optimizer; the scheduler only
@@ -177,6 +181,9 @@ class Trainer:
         # first JIT-warmed steps and noisy data-loading spikes).
         ema_step_s: Optional[float] = None
         ema_alpha = 0.1
+        accum_i = 0
+        accum_loss_sum = 0.0
+        self.optimizer.zero_grad()
         while step < self.cfg.max_steps:
             for batch in dataloader:
                 batch = _cast_batch(batch, device, model_dtype, self.cfg.keep_dtype_keys)
@@ -208,18 +215,28 @@ class Trainer:
                         )
                         g["lr"] = init * mul
 
-                self.optimizer.zero_grad()
                 _, loss = self.model(batch)
-                self.accelerator.backward(loss)
+                # Keep optimizer-step gradients equivalent to a large batch by
+                # averaging microbatch losses before backward. Reporting below
+                # logs the mean *raw* loss over the accumulation window.
+                self.accelerator.backward(loss / accum_steps)
+                accum_loss_sum += float(loss.detach().item())
+                accum_i += 1
+                if accum_i < accum_steps:
+                    continue
                 self.accelerator.clip_grad_norm_(
                     self.model.parameters(), self.cfg.grad_clip_norm
                 )
                 self.optimizer.step()
+                self.optimizer.zero_grad()
 
                 # Cross-rank average for reporting; single-GPU is a no-op.
-                gathered = self.accelerator.gather_for_metrics(loss.detach())
+                report_loss = loss.detach().new_tensor(accum_loss_sum / accum_steps)
+                gathered = self.accelerator.gather_for_metrics(report_loss)
                 loss_val = float(gathered.mean().item())
                 losses.append(loss_val)
+                accum_i = 0
+                accum_loss_sum = 0.0
 
                 step += 1
                 now = time.perf_counter()
@@ -241,6 +258,7 @@ class Trainer:
                         "train/step_time_ms": step_time_s * 1000.0,
                         "train/progress_pct": progress_pct,
                         "train/eta_s":        eta_s,
+                        "train/gradient_accumulation_steps": accum_steps,
                     }
                     # Per-group lr is informative when scheduling is active and
                     # also useful as a sanity check for the per-group coefs.

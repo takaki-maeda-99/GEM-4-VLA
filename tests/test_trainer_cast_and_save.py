@@ -136,6 +136,30 @@ def test_no_double_save_when_max_steps_aligns_with_save_every(tmp_path: Path) ->
     # The dirs check is the load-bearing assertion.)
 
 
+def test_gradient_accumulation_counts_optimizer_steps(tmp_path: Path) -> None:
+    """max_steps remains optimizer-step count under accumulation."""
+    model = _Toy()
+    opt = torch.optim.SGD(model.parameters(), lr=1e-3)
+    dl = DataLoader(_ToyDS(), batch_size=1, collate_fn=_collate)
+    cfg = TrainerConfig(
+        max_steps=3,
+        gradient_accumulation_steps=2,
+        save_every=3,
+        save_dir=str(tmp_path),
+    )
+    acc = _StubAccLog()
+    trainer = Trainer(model, opt, cfg, accelerator=acc)
+    losses = trainer.fit(dl, save_cfg={})
+
+    assert len(losses) == 3
+    assert [step for _, step in acc.log_calls] == [1, 2, 3]
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["step_3"]
+    assert all(
+        payload["train/gradient_accumulation_steps"] == 2
+        for payload, _ in acc.log_calls
+    )
+
+
 def test_final_save_still_fires_when_unaligned(tmp_path: Path) -> None:
     """When max_steps is NOT a multiple of save_every, final save must run."""
     model = _Toy()

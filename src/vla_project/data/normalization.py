@@ -24,7 +24,7 @@ def denormalize(x: torch.Tensor, stats: NormalizationStats) -> torch.Tensor:
 
 import json
 from pathlib import Path
-from typing import Union
+from typing import Any, Dict, Union
 
 
 @dataclass
@@ -58,6 +58,37 @@ def load_q99_stats(path: Union[str, Path], unnorm_key: str) -> Q99Stats:
     q99 = torch.as_tensor(action["q99"], dtype=torch.float32)
     if "mask" in action:
         mask = torch.as_tensor(action["mask"], dtype=torch.bool)
+    else:
+        mask = torch.ones_like(q01, dtype=torch.bool)
+    if not (q01.shape == q99.shape == mask.shape):
+        raise ValueError(
+            f"q01/q99/mask shape mismatch: {q01.shape}, {q99.shape}, {mask.shape}"
+        )
+    return Q99Stats(q01=q01, q99=q99, mask=mask)
+
+
+def load_norm_stats_payload(path: Union[str, Path], unnorm_key: str) -> Dict[str, Any]:
+    """Load the raw per-dataset normalization stats block for checkpoint metadata.
+
+    The returned dict is JSON-compatible and includes every block present in
+    ``dataset_statistics.json`` (typically ``action`` and ``proprio``). Keeping
+    this in checkpoints makes eval reproducible without relying on a sidecar
+    config path.
+    """
+    payload = json.loads(Path(path).read_text())
+    if unnorm_key not in payload:
+        raise KeyError(
+            f"unnorm_key {unnorm_key!r} not in {path}; available: {list(payload.keys())}"
+        )
+    return {unnorm_key: payload[unnorm_key]}
+
+
+def q99_stats_from_block(block: Dict[str, Any]) -> Q99Stats:
+    """Build ``Q99Stats`` from an ``action`` or ``proprio`` stats block."""
+    q01 = torch.as_tensor(block["q01"], dtype=torch.float32)
+    q99 = torch.as_tensor(block["q99"], dtype=torch.float32)
+    if "mask" in block:
+        mask = torch.as_tensor(block["mask"], dtype=torch.bool)
     else:
         mask = torch.ones_like(q01, dtype=torch.bool)
     if not (q01.shape == q99.shape == mask.shape):

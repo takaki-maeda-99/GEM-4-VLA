@@ -47,7 +47,7 @@ class _StubSigWithLayers(torch.nn.Module):
 
 
 def _make_batch(B: int = 2, prompt_max_len: int = 10) -> dict:
-    return dict(
+    batch = dict(
         domain_id=torch.zeros(B, dtype=torch.long),
         scene_image=torch.randn(B, 3, 224, 224),
         # different wrist images per batch element so per-layer features differ
@@ -59,6 +59,22 @@ def _make_batch(B: int = 2, prompt_max_len: int = 10) -> dict:
         target_action=torch.randn(B, 8, 7),
         action_mask=torch.ones(B, 8, dtype=torch.bool),
     )
+    return batch
+
+
+class _StubDINOv2(torch.nn.Module):
+    """Frozen-DINO stand-in returning dense wrist tokens from pixel mean."""
+
+    def __init__(self, model_name=None, hidden_dim: int = 16, num_tokens: int = 256):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.num_tokens = num_tokens
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        B = x.shape[0]
+        seed = x.flatten(1).mean(dim=1)
+        out = torch.zeros(B, self.num_tokens, self.hidden_dim, device=x.device, dtype=x.dtype)
+        return out + seed.view(B, 1, 1)
 
 
 def test_forward_with_wrist_bridge_runs() -> None:
@@ -116,3 +132,54 @@ def test_wrist_bridge_off_default() -> None:
     pred, loss = policy(_make_batch(B=1, prompt_max_len=10))
     assert pred.shape == (1, 8, 7)
     assert torch.isfinite(loss)
+
+
+def test_wrist_dinov2_bridge_residual_runs(monkeypatch) -> None:
+    """DINOv2 wrist residual joins h_w_bridge without touching the LLM path."""
+    import vla_project.models.vision.dinov2 as dinov2_mod
+
+    monkeypatch.setattr(dinov2_mod, "DINOv2Encoder", _StubDINOv2)
+    cfg = VLAPolicyConfig(
+        num_domains=1, hidden_dim=32, action_dim=7, action_chunk_len=8,
+        proprio_dim=8, prompt_max_len=10, num_blocks=4,
+        use_wrist_bridge=True,
+        use_wrist_dinov2=True,
+        wrist_dinov2_hidden_dim=16,
+        wrist_dinov2_num_tokens=256,
+    )
+    policy = VLAPolicy(cfg, vision_encoder=_StubSigWithLayers(num_blocks=cfg.num_blocks),
+                       gemma=_StubGemma())
+    batch = _make_batch(B=2, prompt_max_len=10)
+    batch["wrist_image_dinov2"] = torch.randn(2, 3, 224, 224)
+    pred, loss = policy(batch)
+    assert pred.shape == (2, 8, 7)
+    assert torch.isfinite(loss)
+    assert policy.wrist_dinov2_projector is not None
+    assert policy.wrist_dinov2_gate is not None
+
+
+def test_scene_wrist_dinov2_llm_fusion_runs(monkeypatch) -> None:
+    """Shared DINOv2 scene+wrist tokens can be fused into the LLM vision slots."""
+    import vla_project.models.vision.dinov2 as dinov2_mod
+
+    monkeypatch.setattr(dinov2_mod, "DINOv2Encoder", _StubDINOv2)
+    cfg = VLAPolicyConfig(
+        num_domains=1, hidden_dim=32, action_dim=7, action_chunk_len=8,
+        proprio_dim=8, prompt_max_len=10, num_blocks=4,
+        use_wrist_bridge=False,
+        use_scene_wrist_dinov2_llm=True,
+        wrist_dinov2_hidden_dim=16,
+        wrist_dinov2_num_tokens=256,
+        use_baseline_projectors=True,
+        baseline_scene_init_proj_dim=64,
+    )
+    policy = VLAPolicy(cfg, vision_encoder=_StubSigWithLayers(num_blocks=cfg.num_blocks),
+                       gemma=_StubGemma())
+    batch = _make_batch(B=2, prompt_max_len=10)
+    batch["scene_image_dinov2"] = torch.randn(2, 3, 224, 224)
+    batch["wrist_image_dinov2"] = torch.randn(2, 3, 224, 224)
+    pred, loss = policy(batch)
+    assert pred.shape == (2, 8, 7)
+    assert torch.isfinite(loss)
+    assert policy._llm_vision_tokens == 512
+    assert policy.scene_wrist_dinov2_llm_proj is not None

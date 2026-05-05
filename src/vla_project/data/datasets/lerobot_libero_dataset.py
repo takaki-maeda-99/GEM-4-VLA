@@ -42,7 +42,7 @@ from vla_project.data.transforms.action_alignment import (
     anchor_offsets,
     ee_pose_to_action20,
 )
-from vla_project.data.transforms.image import SiglipImageTransform
+from vla_project.data.transforms.image import DINOv2ImageTransform, SiglipImageTransform
 from vla_project.data.transforms.language import GemmaPromptTokenizer
 
 
@@ -72,6 +72,8 @@ class LeRobotLiberoDataset(IterableDataset):
         action_format: str = "native",
         anchor_window_s: float = 0.0,
         task_index_filter: Optional[int] = None,
+        include_scene_dinov2: bool = False,
+        include_wrist_dinov2: bool = False,
     ) -> None:
         super().__init__()
         if last_action_chunk_mode not in ("zero", "real"):
@@ -133,6 +135,8 @@ class LeRobotLiberoDataset(IterableDataset):
         self.last_action_chunk_mode = last_action_chunk_mode
         self.action_format = action_format
         self.anchor_window_s = float(anchor_window_s)
+        self.include_scene_dinov2 = bool(include_scene_dinov2)
+        self.include_wrist_dinov2 = bool(include_wrist_dinov2)
         # Optional post-hoc task filter: skip samples whose task_index doesn't
         # match. Use this when you need a single-task subset and the wrapped
         # LeRobotDataset's ``episodes=[...]`` filter would mis-reindex (its
@@ -155,6 +159,7 @@ class LeRobotLiberoDataset(IterableDataset):
             stats_path, unnorm_key
         )
         self.image_tx = SiglipImageTransform(size=C.SIGLIP_IMAGE_SIZE, training=False)
+        self.dinov2_image_tx = DINOv2ImageTransform(size=C.SIGLIP_IMAGE_SIZE)
         self.tokenizer = tokenizer
         self._task_idx_to_str: Dict[int, str] = self._build_task_map()
         # Pre-compute the list of valid frame indices when task_index_filter is
@@ -209,8 +214,10 @@ class LeRobotLiberoDataset(IterableDataset):
         return self.image_tx(lerobot_img)
 
     def _sample_to_batch_item(self, sample: Dict[str, Any]) -> Dict[str, torch.Tensor]:
-        scene = self._resize_image(sample["observation.images.image"])
-        wrist = self._resize_image(sample["observation.images.wrist_image"])
+        scene_raw = sample["observation.images.image"]
+        scene = self._resize_image(scene_raw)
+        wrist_raw = sample["observation.images.wrist_image"]
+        wrist = self._resize_image(wrist_raw)
         H = self.action_chunk_len
 
         if self.action_format == "native":
@@ -289,7 +296,7 @@ class LeRobotLiberoDataset(IterableDataset):
 
         if self.proprio_stats is not None:
             proprio = normalize_proprio_q99(proprio, self.proprio_stats)
-        return {
+        item = {
             "domain_id": torch.tensor(self.domain_id, dtype=torch.long),
             "scene_image": scene,
             "wrist_image": wrist,
@@ -299,7 +306,14 @@ class LeRobotLiberoDataset(IterableDataset):
             "last_action_chunk": last_action_chunk,
             "target_action": target_action,
             "action_mask": torch.ones(H, dtype=torch.bool),
+            # v36 wrist_in_llm contract: LeRobot LIBERO carries a wrist camera.
+            "wrist_mask": torch.tensor(True, dtype=torch.bool),
         }
+        if self.include_wrist_dinov2:
+            item["wrist_image_dinov2"] = self.dinov2_image_tx(wrist_raw)
+        if self.include_scene_dinov2:
+            item["scene_image_dinov2"] = self.dinov2_image_tx(scene_raw)
+        return item
 
     def __iter__(self) -> Iterator[Dict[str, torch.Tensor]]:
         # Shard + shuffle. Without shuffle, deterministic stride iteration

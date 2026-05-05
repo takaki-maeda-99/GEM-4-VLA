@@ -42,13 +42,15 @@ def evaluate_libero(
     task_label_fn: Callable[[int], str] = (lambda i: f"task_{i}"),
     video_dir: Optional[Union[str, Path]] = None,
     video_fps: int = 10,
+    video_ext: str = "gif",
 ) -> Dict[str, Any]:
     """Run closed-loop evaluation across tasks and aggregate metrics.
 
     Args:
-        video_dir: when set, captures rollout frames and writes one GIF per
-            episode to ``<video_dir>/<task_label>_ep<N>.gif``. Best-effort:
-            missing imageio installs silently skip writing.
+        video_dir: when set, captures rollout frames and writes one video per
+            episode to ``<video_dir>/<task_label>_ep<N>.<video_ext>``.
+        video_ext: ``gif`` (default, slow but no extra deps) or ``mp4``
+            (~5-10× faster, requires ``imageio-ffmpeg``).
     """
     records: List[Dict[str, Any]] = []
     capture = video_dir is not None
@@ -75,7 +77,7 @@ def evaluate_libero(
                 records.append({"task": label, "result": result})
                 if out_dir is not None and result.frames:
                     _write_video(
-                        out_dir / f"{label}_ep{ep}.gif",
+                        out_dir / f"{label}_ep{ep}.{video_ext}",
                         result.frames,
                         fps=video_fps,
                     )

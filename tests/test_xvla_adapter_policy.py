@@ -146,6 +146,11 @@ def test_from_checkpoint_round_trip(tmp_path: Path) -> None:
                     "q01":  p1.norm_stats.q01.tolist(),
                     "q99":  p1.norm_stats.q99.tolist(),
                     "mask": [bool(b) for b in p1.norm_stats.mask.tolist()],
+                },
+                "proprio": {
+                    "q01":  [-1.0] * C.PROPRIO_DIM,
+                    "q99":  [1.0] * C.PROPRIO_DIM,
+                    "mask": [True] * C.PROPRIO_DIM,
                 }
             }
         },
@@ -180,6 +185,8 @@ def test_from_checkpoint_round_trip(tmp_path: Path) -> None:
         p2.model.action_decoder.fc.weight,
         torch.full_like(p2.model.action_decoder.fc.weight, 0.05),
     )
+    assert p2.proprio_stats is not None
+    assert p2.proprio_stats.q01.shape == (C.PROPRIO_DIM,)
 
 
 def test_compile_mode_off_default_no_compile_call(monkeypatch) -> None:

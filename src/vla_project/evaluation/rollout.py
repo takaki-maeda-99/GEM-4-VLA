@@ -32,8 +32,18 @@ class EpisodeResult:
     info: Dict[str, Any] = field(default_factory=dict)
 
 
-def _zero_action(dim: int = 7) -> np.ndarray:
-    return np.zeros(dim, dtype=np.float32)
+def _libero_warmup_action(dim: int = 7) -> np.ndarray:
+    """Warmup action for LIBERO env settling (matches vla-gemma-4
+    `get_libero_dummy_action`: ``[0,0,0,0,0,0,-1]``).
+
+    Plain-zeros (incl. gripper=0) drift the gripper out of the open state the
+    LIBERO env expects at episode start, shifting the eval distribution. The
+    -1 final element commands "open" under LIBERO's OSC_POSE convention.
+    """
+    a = np.zeros(dim, dtype=np.float32)
+    if dim >= 1:
+        a[-1] = -1.0
+    return a
 
 
 def run_episode(
@@ -71,7 +81,7 @@ def run_episode(
     _maybe_capture(obs)
 
     for _ in range(num_steps_wait):
-        obs = robot.send_action(_zero_action(action_dim))
+        obs = robot.send_action(_libero_warmup_action(action_dim))
         num_env_steps += 1
         _maybe_capture(obs)
         if check(robot, obs):

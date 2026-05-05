@@ -106,13 +106,25 @@ class LIBEROSimRobot(BaseRobot):
         except Exception:
             task_suite_obj = None
         bddl_file = self._resolve_bddl_file(task_obj=task_obj)
-        # Pull the task language from the BDDL file (heuristic: first line that
-        # contains a quoted natural-language goal). Fallback to the file stem.
-        try:
-            text = bddl_file.read_text(errors="ignore")
-            self._language = self._language_from_bddl(text) or bddl_file.stem
-        except OSError:
-            self._language = bddl_file.stem
+        # Resolve task language. Prefer the libero benchmark's task.language
+        # attribute (clean natural English, matches vla-gemma-4 eval_libero
+        # _gemma4.py:130-131 task_description = task.language). Fall back to
+        # parsing (:language ...) from the BDDL file, then to the legacy `;`-
+        # comment heuristic, then to the file stem.
+        # Why: prior heuristic returned ``bddl_file.stem`` (underscored
+        # filename) when no ``;`` comment existed, which tokenizes very
+        # differently from the natural-language phrase the model was trained
+        # against — making the prompt effectively garbage at eval time.
+        if task_obj is not None and getattr(task_obj, "language", None):
+            self._language = str(task_obj.language)
+        else:
+            try:
+                text = bddl_file.read_text(errors="ignore")
+                self._language = (
+                    self._language_from_bddl(text) or bddl_file.stem
+                )
+            except OSError:
+                self._language = bddl_file.stem
 
         env_args = dict(
             bddl_file_name=str(bddl_file),
@@ -152,13 +164,18 @@ class LIBEROSimRobot(BaseRobot):
 
     @staticmethod
     def _language_from_bddl(text: str) -> str:
-        """Heuristic: pull a natural-language description from a BDDL :goal.
+        """Pull a natural-language description from a BDDL ``(:language ...)``
+        form, falling back to a ``;``-comment heuristic.
 
-        BDDL files don't have a standard 'language' field, so we just return
-        the file stem fallback if no obvious phrase is found. The model
-        consumes the string verbatim, so any consistent encoding works for
-        smoke purposes; real eval can override per-task.
+        LIBERO BDDL files use ``(:language Pick the akita ...)`` (no quotes)
+        as the official task description; libero benchmark exposes the same
+        string via ``task.language``. The ``;``-comment branch is kept for
+        BDDL variants that don't use the ``:language`` form.
         """
+        for line in text.splitlines():
+            s = line.strip()
+            if s.startswith("(:language") and s.endswith(")"):
+                return s[len("(:language"):-1].strip()
         for line in text.splitlines():
             s = line.strip()
             if s.startswith(";") and len(s) > 1:
