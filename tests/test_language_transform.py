@@ -33,3 +33,26 @@ def test_batch_call_stacks(tok: GemmaPromptTokenizer) -> None:
     batch = tok.batch(["pick the red block", "stack the blue cube on the green plate"])
     assert batch["input_ids"].shape == (2, C.DEFAULT_PROMPT_MAX_LEN)
     assert batch["attention_mask"].shape == (2, C.DEFAULT_PROMPT_MAX_LEN)
+
+
+def test_prompt_wrapped_with_template(tok: GemmaPromptTokenizer) -> None:
+    """Bare instruction must be wrapped as the v6 reference template before
+    tokenization so the LLM sees ``What action should the robot take to ...?``
+    Verified by decoding back the non-padded tokens."""
+    out = tok("Pick Up The Red Block")
+    n_real = int(out["attention_mask"].sum().item())
+    text = tok._tok.decode(out["input_ids"][:n_real].tolist())
+    assert "what action should the robot take to" in text.lower()
+    assert "pick up the red block" in text.lower()
+
+
+def test_no_implicit_bos(tok: GemmaPromptTokenizer) -> None:
+    """``add_special_tokens=False`` must hold: InputPacker prepends BOS itself
+    and a leading BOS here would shift all RoPE positions for the prompt."""
+    bos_id = tok._tok.bos_token_id
+    if bos_id is None:
+        return  # tokenizer w/o BOS — test trivially holds
+    out = tok("pick the red block")
+    assert out["input_ids"][0].item() != bos_id, (
+        f"first prompt token is BOS (id={bos_id}) — add_special_tokens leaked"
+    )

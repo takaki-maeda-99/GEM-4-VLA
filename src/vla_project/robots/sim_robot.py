@@ -51,11 +51,29 @@ class LIBEROSimRobot(BaseRobot):
         self.libero_path = _ensure_libero_on_path(libero_path)
         self._env = None
         self._language: str = ""
+        # LIBERO benchmark protocol: each task has a list of pre-defined initial
+        # scene states (one per episode_idx). Standard eval calls
+        # ``env.set_init_state(initial_states[episode_idx])`` immediately after
+        # reset. Without this, sim resets to a randomized scene that the model
+        # has never seen and rollouts fail systematically. See upstream
+        # VLA-Adapter run_libero_eval.py:229-242 + 405-419.
+        self._libero_init_states: Optional[Any] = None
+        # Episode index to apply on next reset(); set via ``set_episode_idx``.
+        self._next_episode_idx: Optional[int] = None
 
-    def _resolve_bddl_file(self) -> Path:
-        # LIBERO's bddl files live as
-        # bddl_files/<suite>/<task_index>_*.bddl. We pick the file whose name
-        # starts with the integer task_idx.
+    def _resolve_bddl_file(self, task_obj=None) -> Path:
+        # LIBERO benchmark task ordering is defined by libero_suite_task_map (NOT
+        # alphabetical). When ``task_obj`` is supplied (preferred path, via the
+        # libero.benchmark API used in connect()), we resolve directly from
+        # ``task_obj.problem_folder`` + ``task_obj.bddl_file`` so the same
+        # ``task_idx`` used for init_states points to the same BDDL file.
+        # Without this, alphabetical glob ordering disagrees with the benchmark
+        # ordering on every task except 0 — env opens BDDL X but is initialized
+        # with init_state for task Y.
+        if task_obj is not None:
+            return self.bddl_path_root / task_obj.problem_folder / task_obj.bddl_file
+        # Legacy fallback: alphabetical glob (pre-fix behavior, kept for tests
+        # that don't import the libero benchmark module).
         suite_dir = self.bddl_path_root / self.task_suite
         if not suite_dir.is_dir():
             raise FileNotFoundError(f"BDDL suite dir not found: {suite_dir}")
@@ -76,14 +94,37 @@ class LIBEROSimRobot(BaseRobot):
                 f"libero not importable from {self.libero_path}; "
                 f"set LIBERO_PATH env var or pass libero_path= to LIBEROSimRobot"
             ) from e
-        bddl_file = self._resolve_bddl_file()
-        # Pull the task language from the BDDL file (heuristic: first line that
-        # contains a quoted natural-language goal). Fallback to the file stem.
+        # Resolve BDDL file via the libero benchmark API (matches task_idx ↔
+        # init_states convention). Fall back to legacy alphabetical glob if
+        # libero isn't importable (e.g., stub-based tests).
+        task_obj = None
         try:
-            text = bddl_file.read_text(errors="ignore")
-            self._language = self._language_from_bddl(text) or bddl_file.stem
-        except OSError:
-            self._language = bddl_file.stem
+            from libero.libero import benchmark as _libero_benchmark  # type: ignore
+            benchmark_dict = _libero_benchmark.get_benchmark_dict()
+            task_suite_obj = benchmark_dict[self.task_suite]()
+            task_obj = task_suite_obj.tasks[self.task_idx]
+        except Exception:
+            task_suite_obj = None
+        bddl_file = self._resolve_bddl_file(task_obj=task_obj)
+        # Resolve task language. Prefer the libero benchmark's task.language
+        # attribute (clean natural English, matches vla-gemma-4 eval_libero
+        # _gemma4.py:130-131 task_description = task.language). Fall back to
+        # parsing (:language ...) from the BDDL file, then to the legacy `;`-
+        # comment heuristic, then to the file stem.
+        # Why: prior heuristic returned ``bddl_file.stem`` (underscored
+        # filename) when no ``;`` comment existed, which tokenizes very
+        # differently from the natural-language phrase the model was trained
+        # against — making the prompt effectively garbage at eval time.
+        if task_obj is not None and getattr(task_obj, "language", None):
+            self._language = str(task_obj.language)
+        else:
+            try:
+                text = bddl_file.read_text(errors="ignore")
+                self._language = (
+                    self._language_from_bddl(text) or bddl_file.stem
+                )
+            except OSError:
+                self._language = bddl_file.stem
 
         env_args = dict(
             bddl_file_name=str(bddl_file),
@@ -92,16 +133,49 @@ class LIBEROSimRobot(BaseRobot):
         )
         self._env = OffScreenRenderEnv(**env_args)
         self._env.seed(self.seed)
+        # Load this task's standard LIBERO init_states. Match the upstream
+        # eval protocol so each rollout uses an in-distribution scene.
+        # libero's ``get_task_init_states`` calls ``torch.load`` without
+        # ``weights_only=False``; on PyTorch ≥ 2.6 this fails with
+        # "Unsupported global numpy.core.multiarray._reconstruct" because
+        # the init_states file contains pickled numpy arrays. Bypass
+        # libero's loader and read the file directly.
+        try:
+            import os as _os
+            import torch as _torch
+            from libero.libero import get_libero_path as _get_libero_path  # type: ignore
+            if task_obj is None:
+                # task_obj wasn't loaded above (e.g. libero importable but
+                # benchmark missing). Skip init_states.
+                raise RuntimeError("task_obj unavailable")
+            init_states_path = _os.path.join(
+                _get_libero_path("init_states"),
+                task_obj.problem_folder,
+                task_obj.init_states_file,
+            )
+            self._libero_init_states = _torch.load(
+                init_states_path, weights_only=False
+            )
+        except Exception as e:
+            # If init_states aren't available (older libero or path issue),
+            # fall back to plain env.reset() — random scene.
+            print(f"[LIBEROSimRobot] init_states load failed: {e!r}; using random reset")
+            self._libero_init_states = None
 
     @staticmethod
     def _language_from_bddl(text: str) -> str:
-        """Heuristic: pull a natural-language description from a BDDL :goal.
+        """Pull a natural-language description from a BDDL ``(:language ...)``
+        form, falling back to a ``;``-comment heuristic.
 
-        BDDL files don't have a standard 'language' field, so we just return
-        the file stem fallback if no obvious phrase is found. The model
-        consumes the string verbatim, so any consistent encoding works for
-        smoke purposes; real eval can override per-task.
+        LIBERO BDDL files use ``(:language Pick the akita ...)`` (no quotes)
+        as the official task description; libero benchmark exposes the same
+        string via ``task.language``. The ``;``-comment branch is kept for
+        BDDL variants that don't use the ``:language`` form.
         """
+        for line in text.splitlines():
+            s = line.strip()
+            if s.startswith("(:language") and s.endswith(")"):
+                return s[len("(:language"):-1].strip()
         for line in text.splitlines():
             s = line.strip()
             if s.startswith(";") and len(s) > 1:
@@ -113,7 +187,15 @@ class LIBEROSimRobot(BaseRobot):
         #   "agentview_image"      -> (H, W, 3) uint8 (scene)
         #   "robot0_eye_in_hand_image" -> (H, W, 3) uint8 (wrist)
         #   "robot0_eef_pos" / "robot0_eef_quat" / "robot0_gripper_qpos"
-        # ProprioVec convention: 3 (xyz) + 4 (quat) + 1 (gripper) = 8.
+        # ProprioVec convention (must match LeRobot LIBERO dataset's
+        # observation.state schema, names=['x','y','z','rx','ry','rz','rw',
+        # 'gripper']): 3 (xyz) + 3 (Euler-style rotation) + 2 (gripper qpos)
+        # = 8. The dataset stores rotation NOT as a quaternion despite the
+        # 'rw' name — the values look like Euler-style {roll≈π, pitch≈0,
+        # yaw≈small} for LIBERO's arm-pointing-down configuration, with
+        # 'rw' being a 2nd gripper finger qpos slot.
+        # Verified by inspecting lerobot/libero_spatial_image first samples
+        # (rx≈3.14 for arm-down; values not normalizable as a unit quat).
         scene = np.asarray(raw["agentview_image"], dtype=np.uint8)
         wrist = np.asarray(raw["robot0_eye_in_hand_image"], dtype=np.uint8)
         if scene.shape != (self.image_size, self.image_size, 3):
@@ -126,10 +208,39 @@ class LIBEROSimRobot(BaseRobot):
         # (lines 143-154) so closed-loop obs match the dataset distribution.
         scene = scene[::-1, ::-1, :]
         wrist = wrist[::-1, ::-1, :]
+        # Convert sim's eef_quat (xyzw) to axis-angle (3 dims) to match the
+        # LeRobot LIBERO dataset's observation.state format. The dataset's
+        # schema labels 8 dims as ['x','y','z','rx','ry','rz','rw','gripper']
+        # but inspection of values + cross-reference with upstream
+        # VLA-Adapter (experiments/robot/libero/libero_utils.py:63-87 +
+        # run_libero_eval.py:260) shows the 4th-7th components are actually
+        # 3 axis-angle + 2 gripper qpos, NOT a quaternion + 1 gripper. Use
+        # the upstream's quat2axisangle implementation verbatim.
+        quat_xyzw = np.asarray(raw["robot0_eef_quat"], dtype=np.float32)
+        # quat2axisangle (from robosuite via VLA-Adapter)
+        if quat_xyzw[3] > 1.0:
+            quat_xyzw[3] = 1.0
+        elif quat_xyzw[3] < -1.0:
+            quat_xyzw[3] = -1.0
+        den = float(np.sqrt(1.0 - quat_xyzw[3] * quat_xyzw[3]))
+        import math as _math
+        if _math.isclose(den, 0.0):
+            axis_angle = np.zeros(3, dtype=np.float32)
+        else:
+            axis_angle = (
+                quat_xyzw[:3].astype(np.float32) * 2.0 * _math.acos(float(quat_xyzw[3])) / den
+            ).astype(np.float32)
+        gripper = np.asarray(raw["robot0_gripper_qpos"], dtype=np.float32)
+        if gripper.shape[0] < 2:
+            # Some LIBERO versions report only one finger. Pad with the
+            # negation, matching the symmetric two-finger pattern in dataset.
+            gripper = np.array([gripper[0], -gripper[0]], dtype=np.float32)
+        else:
+            gripper = gripper[:2]
         proprio = np.concatenate([
             np.asarray(raw["robot0_eef_pos"], dtype=np.float32),
-            np.asarray(raw["robot0_eef_quat"], dtype=np.float32),
-            np.asarray(raw["robot0_gripper_qpos"], dtype=np.float32)[:1],
+            axis_angle,
+            gripper,
         ]).astype(np.float32)
         return {
             "scene_image": np.ascontiguousarray(scene),
@@ -139,10 +250,27 @@ class LIBEROSimRobot(BaseRobot):
             "_raw": raw,  # kept for debugging / future success-detection
         }
 
+    def set_episode_idx(self, episode_idx: int) -> None:
+        """Mark the next ``reset()`` call to use the LIBERO benchmark's
+        standard init_state for ``episode_idx`` (0-indexed). Required for
+        in-distribution rollouts; without it, eval scenes are randomized and
+        learned policies fail.
+        """
+        self._next_episode_idx = int(episode_idx)
+
     def reset(self) -> Dict[str, Any]:
         if self._env is None:
             raise RuntimeError("LIBEROSimRobot not connected; call connect() first")
         raw = self._env.reset()
+        if self._libero_init_states is not None and self._next_episode_idx is not None:
+            ep = self._next_episode_idx
+            n = len(self._libero_init_states)
+            if 0 <= ep < n:
+                # set_init_state returns the obs dict after applying the state
+                raw = self._env.set_init_state(self._libero_init_states[ep])
+            else:
+                print(f"[LIBEROSimRobot] episode_idx={ep} out of range [0, {n}); "
+                      f"using plain reset")
         return self._wrap_obs(raw)
 
     def get_observation(self) -> Dict[str, Any]:

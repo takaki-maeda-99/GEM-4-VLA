@@ -1,0 +1,34 @@
+# Baseline (7-dim native) full-sweep eval: 10 LIBERO-Spatial tasks × 5 eps.
+# 50 rollouts; ~30 s/rollout on dl40 A100 → ~25 min wall-clock.
+seed: 0
+checkpoint:
+  path: outputs/libero_spatial_lora_r64_2026-05-01/checkpoints/step_10000
+model:
+  num_domains: 1
+  hidden_dim: 1536
+  num_blocks: 35
+  use_grad_checkpoint: false
+  lora:
+    r: 64
+    alpha: 128
+    target_modules: [q_proj, v_proj]
+    dropout: 0.0
+vision:
+  model_name: google/siglip-so400m-patch14-224
+language:
+  model_name: google/gemma-4-E2B
+data:
+  unnorm_key: libero_spatial_no_noops
+  stats_path: data/norm_stats/libero_spatial.json
+robot:
+  bddl_path_root: /misc/dl00/takaki/vla-gemma-4/LIBERO/libero/libero/bddl_files
+  task_suite: libero_spatial
+  image_size: 224
+  libero_path: ${oc.env:LIBERO_PATH,/misc/dl00/takaki/vla-gemma-4/LIBERO}
+eval:
+  task_idxs: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+  num_episodes_per_task: 5
+  max_steps: 200
+  num_steps_wait: 5
+  video_dir: outputs/libero_spatial_lora_r64_2026-05-01/eval_videos_step10000
+  video_fps: 10

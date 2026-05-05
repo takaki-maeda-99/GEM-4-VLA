@@ -19,9 +19,20 @@ class RotaryEmbedding(nn.Module):
 
 
 def _rotate_half(x: torch.Tensor) -> torch.Tensor:
-    x1 = x[..., : x.shape[-1] // 2]
-    x2 = x[..., x.shape[-1] // 2 :]
-    return torch.cat([-x2, x1], dim=-1)
+    """Interleaved-pair rotate_half, matching the VLA-Adapter reference
+    (action_heads.py:197-202). The legacy half-and-half implementation
+    `cat([-x[..., D/2:], x[..., :D/2]], dim=-1)` is consistent with a
+    cos/sin layout `[c0, c1, ..., c0, c1, ...]` (LLaMA-style); the reference
+    uses an interleaved swap with the same `cat([freqs, freqs], dim=-1)`
+    cos/sin. To exactly match the reference's positional encoding so that
+    a fresh-init action head sees the same per-position rotation pattern
+    as the published Bridge baseline (61% LIBERO success), we mirror the
+    interleaved convention even though it is internally inconsistent with
+    the cos/sin layout.
+    """
+    x1 = x[..., ::2]
+    x2 = x[..., 1::2]
+    return torch.stack((-x2, x1), dim=-1).reshape_as(x)
 
 
 def apply_rope(q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor):

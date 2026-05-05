@@ -1,0 +1,53 @@
+# V8: Mode B (frozen LLM, no LoRA) — mirrors the vla-gemma-4 wristb_b16_v2
+# baseline that achieved 73% LIBERO-Spatial. Diffs vs v7:
+#   - LoRA disabled (lora_r=0). Gemma4 fully frozen.
+#   - Only soft_prompts, action_queries, projectors, action_head train.
+#   - LR coefs reordered: with no LoRA, gemma_lora group is empty; the
+#     learning_coef=0.25 from baseline applies to soft_prompts (and we keep
+#     scene/wrist projections at full LR per Bridge Mode B convention).
+#
+# Other hyperparams kept at v7 (lr=2e-4, wd=0.01, clip=1.0, bs=8). Architecture
+# identical to v6/v7: legacy block, 24 blocks, ref input layout, ref prompt fmt.
+seed: 0
+model:
+  num_domains: 1
+  hidden_dim: 1536
+  num_blocks: 24
+  use_grad_checkpoint: true
+  # No `lora:` key -> gemma fully frozen (gemma4_wrapper.py:74-79).
+vision:
+  model_name: google/siglip-so400m-patch14-224
+language:
+  model_name: google/gemma-4-E2B
+data:
+  type: libero_lerobot_real
+  repo_id: lerobot/libero_spatial_image
+  stats_path: data/norm_stats/libero_spatial.json
+  unnorm_key: libero_spatial_no_noops
+  fps: 10
+  download_videos: false
+  domain_id: 0
+  last_action_chunk_mode: zero
+train:
+  batch_size: 8
+  lr: 2.0e-4
+  weight_decay: 0.01
+  max_steps: 10000
+  freeze_steps: 0
+  warmup_steps: 500
+  min_lr_ratio: 1.0
+  grad_clip_norm: 1.0
+  lr_coefs:
+    gemma_lora:     0.0    # no LoRA params; coef irrelevant
+    siglip:         0.0    # SigLIP frozen
+    soft_prompts:   0.25   # baseline learning_coef
+    action_queries: 1.0
+    projections:    1.0
+    action_head:    1.0
+  save_every: 2500
+  save_dir: outputs/libero_spatial_v8/checkpoints
+wandb:
+  enabled: true
+  project: vla-project
+  name: libero_spatial_v8_modeB
+  tags: [libero_spatial, bridge_form, legacy_block, num_blocks_24, ref_layout, ref_prompt_fmt, mode_b, frozen_llm]

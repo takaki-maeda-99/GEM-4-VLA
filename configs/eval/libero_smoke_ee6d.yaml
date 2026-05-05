@@ -1,0 +1,31 @@
+# EE6D closed-loop smoke. 1 task × 1 episode, freshly-initialized model.
+# Verifies the EE6D inverse-decode path (anchor → delta → LIBERO send_action)
+# end-to-end, not learning. For real eval point checkpoint.path at a trained
+# step_*/ directory.
+seed: 0
+model:
+  num_domains: 1
+  hidden_dim: 1536
+  num_blocks: 35
+  action_dim: 20
+  action_chunk_len: 30
+  loss_type: ee6d
+  use_grad_checkpoint: false
+vision:
+  model_name: google/siglip-so400m-patch14-224
+language:
+  model_name: google/gemma-4-E2B
+data:
+  unnorm_key: libero_spatial_no_noops
+  stats_path: ${oc.env:LIBERO_STATS_PATH,data/norm_stats/libero_spatial.json}
+  action_format: ee6d
+robot:
+  bddl_path_root: /misc/dl00/takaki/vla-gemma-4/LIBERO/libero/libero/bddl_files
+  task_suite: libero_spatial
+  image_size: 224
+  libero_path: ${oc.env:LIBERO_PATH,/misc/dl00/takaki/vla-gemma-4/LIBERO}
+eval:
+  task_idxs: [0]
+  num_episodes_per_task: 1
+  max_steps: 30
+  num_steps_wait: 5

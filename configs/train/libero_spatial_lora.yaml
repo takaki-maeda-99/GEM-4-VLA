@@ -1,0 +1,55 @@
+# LIBERO-Spatial 10k training, Stage 2 (Gemma frozen + LoRA on q_proj/v_proj).
+# Same hyper-params as libero_spatial.yaml; only model.lora block added.
+seed: 0
+model:
+  num_domains: 1
+  hidden_dim: 1536
+  num_blocks: 35
+  use_grad_checkpoint: true
+  lora:
+    r: 64
+    alpha: 128       # alpha/r = 2 (LoRA paper convention)
+    target_modules: [q_proj, v_proj]
+    dropout: 0.0
+vision:
+  model_name: google/siglip-so400m-patch14-224
+language:
+  model_name: google/gemma-4-E2B
+data:
+  type: libero_lerobot_real
+  repo_id: lerobot/libero_spatial_image
+  stats_path: data/norm_stats/libero_spatial.json
+  unnorm_key: libero_spatial_no_noops
+  fps: 10
+  download_videos: false
+  domain_id: 0
+  last_action_chunk_mode: real
+train:
+  # bs=4 on 40GB GPU after the proper-FFN action head fix; the 4× FFN
+  # expansion (1536→6144) blows past 40GB at bs=8. bs=8 still works on
+  # 80GB; raise PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True there.
+  batch_size: 4
+  lr: 1.0e-4
+  weight_decay: 0.01
+  max_steps: 10000
+  # Per-group X-VLA stage curriculum:
+  # - gemma_lora / siglip: freeze 1000 -> warmup 2000 -> flat at peak
+  # - soft_prompts:              warmup 2000 -> flat at peak (no freeze)
+  # - bridge/query/head: constant LR (NOT in schedule_group_names default)
+  freeze_steps: 1000
+  warmup_steps: 2000
+  min_lr_ratio: 1.0            # no cosine decay; flat peak after warmup
+  lr_coefs:                    # X-VLA-Adapter convention; matches optim.py defaults
+    gemma_lora:     0.1
+    siglip:         0.1
+    soft_prompts:   0.1
+    action_queries: 1.0
+    projections:    1.0
+    action_head:    1.0
+  save_every: 5000
+  save_dir: outputs/libero_spatial_lora_r64_2026-05-01/checkpoints
+wandb:
+  enabled: true
+  project: vla-project
+  name: libero_spatial_lora_r64_bs8_10k_2026-05-01
+  tags: [libero_spatial, bs8, stage2_lora, lora_r64, real_prior_chunk]

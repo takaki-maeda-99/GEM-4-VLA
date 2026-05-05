@@ -9,7 +9,7 @@ def test_pred_action_differs_per_domain():
     policy = VLAPolicy(cfg, _StubSig(), _StubGemma())
     # ensure per-domain weights are actually distinct
     for proj in [policy.scene_proj, policy.wrist_proj, policy.proprio_proj,
-                 policy.last_action_proj, policy.action_decoder]:
+                 policy.action_decoder]:
         torch.nn.init.normal_(proj.fc.weight, std=0.5)
 
     B = 1

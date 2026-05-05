@@ -21,9 +21,19 @@ NUM_ACTION_TOKENS: int = 64
 WRIST_PLACEHOLDER_BEGIN_IDX: int = 258949  # <unused3032>
 NUM_WRIST_TOKENS: int = 256
 
+# vla-gemma-4 baseline uses the same unused-token range for scene vision PLE.
+VISION_PLACEHOLDER_BEGIN_IDX: int = WRIST_PLACEHOLDER_BEGIN_IDX
+
 # === Soft prompt ===
 SOFT_PROMPT_BEGIN_IDX: int = 259461 + 1   # one past PROPRIO range from vla-gemma-4
 NUM_SOFT_PROMPT_TOKENS: int = 32
+
+# === Proprio (single-token placeholder for the LLM input layout) ===
+# Matches vla-gemma-4 / VLA-Adapter reference: a single token between vision
+# and action queries that the LLM attends over for cross-modal context. The
+# proprio VECTOR itself feeds the action head separately via proprio_proj;
+# this placeholder is only an LLM positional anchor.
+PROPRIO_PLACEHOLDER_IDX: int = 259461
 
 # === Architecture-wide defaults (overridable in config) ===
 LLM_HIDDEN_DIM: int = 1536
@@ -33,8 +43,9 @@ PLE_DIM: int = 256
 NUM_SCENE_TOKENS: int = 256
 SIGLIP_HIDDEN_DIM: int = 1152
 SIGLIP_IMAGE_SIZE: int = 224
+SIGLIP_NUM_BLOCKS: int = 27
 
-DEFAULT_PROMPT_MAX_LEN: int = 50
+DEFAULT_PROMPT_MAX_LEN: int = 20  # match vla-gemma-4 73% baseline (libero_loader.py:74)
 
 ACTION_CHUNK_LEN: int = 8
 ACTION_DIM: int = 7

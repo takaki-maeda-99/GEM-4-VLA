@@ -1,0 +1,71 @@
+# Single-task overfit smoke for the bridge-form action head.
+# Goal: confirm the architecture can in principle solve LIBERO at all.
+# Trains heavily on 10 episodes of one task ("next_to_the_cookie_box" = BDDL
+# task_idx 3) and eval on the same task to test if success_rate > 0% pops out.
+seed: 0
+model:
+  num_domains: 1
+  hidden_dim: 1536
+  num_blocks: 35
+  use_grad_checkpoint: true
+  lora:
+    r: 64
+    alpha: 128
+    target_modules: [q_proj, v_proj]
+    dropout: 0.0
+vision:
+  model_name: google/siglip-so400m-patch14-224
+language:
+  model_name: google/gemma-4-E2B
+data:
+  type: libero_lerobot_real
+  repo_id: lerobot/libero_spatial_image
+  stats_path: data/norm_stats/libero_spatial.json
+  unnorm_key: libero_spatial_no_noops
+  fps: 10
+  # All 46 episodes of one task (cookie-box variant).
+  # LeRobot dataset's own task_index for "next_to_the_cookie_box" is 0 (its
+  # ordering is by first appearance, not alphabetical). The eval uses BDDL
+  # task_idx=3 for the same task string (BDDL is alphabetical) — see
+  # configs/eval/libero_overfit_task3.yaml.
+  # We don't use ``episodes=[...]`` to filter because lerobot's filter
+  # mis-reindexes for non-contiguous lists; instead we filter at iter time.
+  task_index_filter: 0
+  download_videos: false
+  domain_id: 0
+  # The Bridge head ignores last_action_chunk (x_init = zeros), so 'real' mode
+  # would just waste I/O fetching 2H actions per sample AND drop ~H frames
+  # near each episode boundary that fail the chunk-len check. 'zero' is free.
+  last_action_chunk_mode: zero
+train:
+  batch_size: 4
+  # 3x base LR vs main config — overfit target needs faster bias adaptation
+  # than the regularized 1e-4. Single-batch diagnostic confirmed lr=1e-3
+  # drops loss 0.34 -> 0.03 in 500 steps; 3e-4 is the conservative middle.
+  lr: 3.0e-4
+  # Bias terms (action_decoder, etc.) need to fit per-channel offsets quickly
+  # for overfit. With wd=0.01 and tiny grads (~1e-3), the decay opposes the
+  # bias-update force enough to slow convergence noticeably.
+  weight_decay: 0.0
+  max_steps: 3000
+  freeze_steps: 0
+  warmup_steps: 200
+  min_lr_ratio: 1.0
+  # Default 1.0 makes adam's effective per-step magnitude OK after warmup
+  # (adam normalizes anyway) but bites at init. Relax to 10 to avoid the
+  # init-step truncation while still catching numerical blowup.
+  grad_clip_norm: 10.0
+  lr_coefs:
+    gemma_lora:     0.1
+    siglip:         0.1
+    soft_prompts:   0.1
+    action_queries: 1.0
+    projections:    1.0
+    action_head:    1.0
+  save_every: 1500
+  save_dir: outputs/_overfit_task3/checkpoints
+wandb:
+  enabled: true
+  project: vla-project
+  name: libero_spatial_overfit_task3_bridge
+  tags: [libero_spatial, overfit, bridge_form]

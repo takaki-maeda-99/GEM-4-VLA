@@ -1,0 +1,47 @@
+# 100-step real-data smoke for the proper-FFN action head fix.
+# Same hparams as libero_spatial_lora.yaml but capped at 100 steps, no warmup
+# freeze (we want to see loss move within the budget), wandb off, no save.
+seed: 0
+model:
+  num_domains: 1
+  hidden_dim: 1536
+  num_blocks: 35
+  use_grad_checkpoint: true
+  lora:
+    r: 64
+    alpha: 128
+    target_modules: [q_proj, v_proj]
+    dropout: 0.0
+vision:
+  model_name: google/siglip-so400m-patch14-224
+language:
+  model_name: google/gemma-4-E2B
+data:
+  type: libero_lerobot_real
+  repo_id: lerobot/libero_spatial_image
+  stats_path: data/norm_stats/libero_spatial.json
+  unnorm_key: libero_spatial_no_noops
+  fps: 10
+  episodes: [0, 1, 2, 3]
+  download_videos: false
+  domain_id: 0
+  last_action_chunk_mode: real
+train:
+  batch_size: 4
+  lr: 1.0e-4
+  weight_decay: 0.01
+  max_steps: 100
+  freeze_steps: 0
+  warmup_steps: 0
+  min_lr_ratio: 1.0
+  lr_coefs:
+    gemma_lora:     0.1
+    siglip:         0.1
+    soft_prompts:   0.1
+    action_queries: 1.0
+    projections:    1.0
+    action_head:    1.0
+  save_every: 100
+  save_dir: outputs/_smoke100/checkpoints
+wandb:
+  enabled: false

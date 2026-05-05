@@ -1,0 +1,92 @@
+# V29: D variant — drop Gemma LoRA, add wrist-only SigLIP LoRA.
+#
+# Hypothesis: SigLIP wasn't pretrained on close-up wrist robot views; let LoRA
+# adapt the wrist encoder while keeping the LLM strictly frozen (= v25 setup
+# for everything Gemma-related). Scene SigLIP path stays identical to v25
+# (frozen, no LoRA) to preserve the 74% scene-conditioning behavior.
+#
+# Schedule (post user instruction 2026-05-04 21):
+#   - warmup_steps = 1000 (10%) for above-LLM modules
+#   - action_queries / scene_projection: coef 0.5 (= 1e-4 final, gentle)
+#   - head_projections / action_head: coef 1.0 (= 2e-4, full base_lr)
+#   - wrist_siglip (LoRA): coef 0.1 (= 2e-5, X-VLA "small backbone LR" recipe)
+#   - gemma_lora: empty group (no Gemma LoRA)
+#   - schedule_group_names: [wrist_siglip, action_queries, scene_projection]
+#   - freeze_group_names: empty (no group held at lr=0 — Gemma is just
+#     parameter-frozen, not LR-scheduled)
+#
+# Active LoRA: wrist_vision_encoder (deepcopy of frozen SigLIP) with peft
+# adapters on timm ViT's `qkv` projections per block. ~2 M trainable.
+#
+# Launch (gemma4 venv, single-GPU on dl40 GPU 2/3/4 once 0 is free):
+#   CUDA_VISIBLE_DEVICES=<free> \
+#   PYTHONPATH=/misc/dl00/takaki/X-VLA-Adapter/src:\
+#     /misc/dl00/takaki/vla-gemma-4/VLA-Adapter:\
+#     /misc/dl00/takaki/vla-gemma-4 \
+#   /misc/dl00/takaki/vla-gemma-4/.venv-gemma4/bin/python scripts/train.py \
+#     /misc/dl00/takaki/X-VLA-Adapter/configs/train/libero_spatial_v29.yaml
+seed: 0
+model:
+  num_domains: 1
+  compat_profile: x_vla_adapter
+  hidden_dim: 1536
+  num_blocks: 24
+  use_grad_checkpoint: true
+  use_wrist_bridge: true
+  ungated_streams: false
+  use_soft_prompt: false
+  prompt_max_len: 20
+  use_baseline_projectors: true
+  baseline_scene_init_proj_dim: 8192
+  vision_placeholder_mode: unused_range
+  freeze_llm_and_aq: false
+  freeze_action_queries: false
+  wrap_llm_in_no_grad: false
+  wrist_siglip_lora:
+    r: 16
+    alpha: 32
+    target_modules: [qkv]
+    dropout: 0.0
+vision:
+  type: timm
+  model_name: google/siglip-so400m-patch14-224
+language:
+  model_name: google/gemma-4-E2B
+data:
+  type: libero_rlds
+  data_dir: /misc/dl00/takaki/vla-gemma-4/data/modified_libero_rlds
+  dataset_name: libero_spatial_no_noops
+  action_chunk_len: 8
+  shuffle_buffer_size: 256000
+  train: true
+  domain_id: 0
+  seed: 42
+  unnorm_key: libero_spatial_no_noops
+  stats_path: /misc/dl00/takaki/vla-gemma-4/VLA-Adapter/outputs/LIBERO-Spatial-Pro/dataset_statistics.json
+train:
+  batch_size: 8
+  lr: 2.0e-4
+  weight_decay: 0.01
+  max_steps: 10000
+  freeze_steps: 0                          # no LR-freeze stage
+  warmup_steps: 1000                       # 10% of max_steps for above-LLM groups
+  freeze_group_names: []
+  schedule_group_names: [wrist_siglip, action_queries, scene_projection]
+  min_lr_ratio: 1.0
+  grad_clip_norm: 1.0
+  lr_coefs:
+    gemma_lora:        0.0                  # empty group anyway
+    siglip:            0.0                  # scene SigLIP frozen, no LoRA
+    wrist_siglip:      0.1                  # = 2e-5 final (LoRA "small backbone")
+    soft_prompts:      0.0                  # no soft prompt hub
+    action_queries:    0.5                  # = 1e-4 final (above-LLM, gentler)
+    scene_projection:  0.5                  # = 1e-4 final (above-LLM, gentler)
+    head_projections:  1.0                  # = 2e-4 final
+    action_head:       1.0                  # = 2e-4 final
+  save_every: 2500
+  save_dir: outputs/libero_spatial_v29/checkpoints
+wandb:
+  enabled: true
+  project: vla-project
+  name: libero_spatial_v29_wrist_siglip_lora
+  tags: [libero_spatial, rlds, mode_a_partial, wrist_siglip_lora, aq_trainable, wrist_bridge, baseline_arch, timm, unused_range]

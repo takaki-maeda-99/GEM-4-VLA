@@ -2,8 +2,12 @@
 # ZeRO-2 shards optimizer states + grads (params remain replicated). Lighter
 # than FSDP; useful when AdamW state is the dominant memory cost.
 #
-# REQUIRES: `uv add deepspeed`. DeepSpeed compiles CUDA extensions on first
-# install (~5-10 min). Skip-if-not-installed by design.
+# Verified working 2026-05-01 on GPU 4+5: `losses=[0.867, 2.558]` (matches
+# DDP within noise). Unlike FSDP, ZeRO-2 does not shard parameters and so
+# is unaffected by the nn.MultiheadAttention blocker.
+#
+# Requires: `deepspeed>=0.18` (already in pyproject). First DS run JIT-builds
+# CPU/CUDA extensions; subsequent runs skip the rebuild.
 #
 # Pick GPUs at run time via CUDA_VISIBLE_DEVICES.
 compute_environment: LOCAL_MACHINE

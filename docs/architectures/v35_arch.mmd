@@ -1,0 +1,121 @@
+%%{init: {"flowchart": {"htmlLabels": true, "curve": "linear"}, "themeVariables": {"fontSize": "14px"}}}%%
+graph TD
+    %% ============= INPUTS =============
+    subgraph Inputs["📥 Inputs (single sample, batch packed downstream)"]
+        SCENE["scene_image<br/>(256, 256, 3) uint8"]
+        WRIST["wrist_image<br/>(256, 256, 3) uint8"]
+        PROMPT["task instruction<br/>str (natural language)"]
+        PROPRIO["proprio<br/>(8,) float32 raw<br/>(eef_pos[3] + axis_angle[3] + gripper_qpos[2])"]
+        DOMAIN_ID["domain_id ∈ {0,1,2,3}<br/>0=spatial, 1=object, 2=goal, 3=10"]
+    end
+
+    %% ============= VISION (FROZEN) =============
+    subgraph Vision["🔒 Vision encoder (frozen, scene+wrist shared)"]
+        SIGLIP["SigLIP-So400m timm<br/>vit_so400m_patch14_siglip_224.v2_webli<br/>27 blocks · embed=1152"]
+    end
+
+    %% ============= IMAGE PREPROCESS =============
+    PRE["lanczos3 256→224 + SigLIP transform<br/>(Resize 248 + CC 224 + Normalize 0.5)"]
+    SCENE --> PRE
+    WRIST --> PRE
+    PRE --> SIGLIP
+
+    SIGLIP --> SCENE_TOK["scene_tok<br/>(B, 256, 1152)<br/>last hidden state"]
+    SIGLIP --> WRIST_LAST["wrist_tok_raw<br/>(B, 256, 1152)<br/>SigLIP final"]
+    SIGLIP --> WRIST_BR["wrist_per_layer<br/>(B, 25, 256, 1152)<br/>blocks 0..24 outputs"]
+
+    %% ============= ABOVE-LLM PROJECTORS (DA × 2-LAYER) =============
+    subgraph AboveLLM["🔥 Above-LLM (per-domain DA-2-MLP, warmup'd)"]
+        SCENE_PROJ["scene_proj<br/>DomainAwareTwoLayerMLP<br/>1152 → 1536 → 1536, GELU<br/>4-domain Embedding rows<br/>~5 M × 4 params"]
+        AQ["action_query_hub.queries<br/>shared (64, 1536) zero-init<br/>~98 K params, trainable"]
+        SP_HUB["soft_prompt_hub<br/>nn.Embedding(4, 32 × 1536)<br/>4-domain × 32 prompt tokens<br/>~196 K params"]
+    end
+
+    SCENE_TOK --> SCENE_PROJ
+    DOMAIN_ID --> SCENE_PROJ
+    SCENE_PROJ --> SCENE_E["scene_e<br/>(B, 256, 1536)"]
+    AQ --> ACTION_E["action_q_e<br/>(B, 64, 1536)"]
+    DOMAIN_ID --> SP_HUB
+    SP_HUB --> SOFT_E["soft_e<br/>(B, 32, 1536)"]
+
+    %% ============= LLM INPUT BUILD =============
+    PROMPT --> TOK["GemmaPromptTokenizer<br/>max_len=20"]
+    TOK --> PROMPT_IDS["prompt_input_ids<br/>(B, 20)"]
+
+    subgraph InputPack["InputPacker (vision_placeholder_mode=unused_range)"]
+        IP["Layout v33+:<br/>[BOS] [soft_prompt(32)] [scene-placeholder(256)] [prompt_text(20)] [action(64)] [EOS]<br/>= 374 token IDs<br/>soft_prompt 位置: 259462..259493<br/>scene 位置: 258949..259204<br/>action 位置: 258885..258948<br/>(NO PROPRIO slot)"]
+    end
+    PROMPT_IDS --> IP
+
+    %% ============= LLM =============
+    subgraph LLM["🧊+🔥 LLM = Gemma4-E2B (frozen base + LoRA r=64)"]
+        EMBED["embed_tokens<br/>(374, 1536)"]
+        SCATTER["scatter:<br/>· soft_e at packed.idx['soft_prompt']<br/>· scene_e at packed.idx['scene']<br/>· action_q_e at packed.idx['action']"]
+        PLE["get_per_layer_inputs<br/>(B, 374, 35, ple_dim=256)<br/>computed from input_ids"]
+        GEMMA["Gemma4TextModel · 35 layers<br/>frozen base + LoRA q_proj/v_proj r=64 α=128<br/>~13.8 M LoRA params trainable<br/>NO no_grad-wrap (LoRA needs grad)"]
+        HS["hidden_states tuple<br/>(B, 36, 374, 1536)"]
+    end
+
+    IP --> EMBED
+    IP --> PLE
+    EMBED --> SCATTER
+    SOFT_E --> SCATTER
+    SCENE_E --> SCATTER
+    ACTION_E --> SCATTER
+    SCATTER --> GEMMA
+    PLE --> GEMMA
+    GEMMA --> HS
+
+    %% ============= BELOW-LLM PREP =============
+    subgraph BelowLLM["🔥 Below-LLM action head input (DA-2-MLP, no warmup)"]
+        SLICE_HA["slice action positions<br/>h_a (B, 25, 64, 1536)"]
+        SLICE_HT["slice scene positions<br/>h_t (B, 25, 256, 1536)"]
+        WRIST_PROJ_BR["wrist_projector_bridge<br/>nn.Linear(1152→1536)<br/>shared single Linear"]
+        H_W_BRIDGE["h_w_bridge<br/>(B, 25, 256, 1536)"]
+        WRIST_PROJ["wrist_proj<br/>DomainAwareTwoLayerMLP (per-domain × 2-MLP)<br/>1152→1536→1536"]
+        H_W["h_w (B, 256, 1536)<br/>(dead when use_wrist_bridge=True)"]
+        PROP_PROJ["proprio_proj<br/>DomainAwareTwoLayerMLP per-domain<br/>8→1536→1536"]
+        P["p (B, 1, 1536)"]
+    end
+
+    HS --> SLICE_HA
+    HS --> SLICE_HT
+    WRIST_BR --> WRIST_PROJ_BR
+    WRIST_PROJ_BR --> H_W_BRIDGE
+    WRIST_LAST --> WRIST_PROJ
+    DOMAIN_ID --> WRIST_PROJ
+    WRIST_PROJ --> H_W
+    PROPRIO --> PROP_PROJ
+    DOMAIN_ID --> PROP_PROJ
+    PROP_PROJ --> P
+
+    %% ============= ACTION HEAD =============
+    subgraph ActionHead["🔥 Action head · 24 × MLPResNetBlock_Pro (trainable, no warmup)"]
+        X_INIT["x_init = zeros(B, 8, 7×1536=10752)<br/>+ 0.02·randn (training)"]
+        LN1_FC1["LN(10752) + fc1(10752→1536) + ReLU<br/>→ (B, 8, 1536)"]
+        BLOCK["block_i (× 24) MLPResNetBlock_Pro:<br/>4-stream attention<br/>q from x; k_self/v_self from x<br/>k_adapter/v_adapter from h_a[:,i+1] ⊕ p<br/>k_task/v_task from h_t[:,i+1] (256 tokens)<br/>k_wrist/v_wrist from h_w_bridge[:,i+1]<br/>RoPE on q + each k_*<br/>tanh(g_task), tanh(g_wrist) gating<br/>+ FFN (LN + Linear D→D + ReLU)"]
+        TRIM["x[:, :8, :]"]
+        LN2_FC2["LN(1536) + fc2(1536→1536) → (B, 8, 1536)"]
+        ACT_DEC["action_decoder<br/>DomainAwareTwoLayerMLP per-domain<br/>1536→1536→7"]
+    end
+
+    X_INIT --> LN1_FC1 --> BLOCK --> TRIM --> LN2_FC2 --> ACT_DEC
+    SLICE_HA --> BLOCK
+    SLICE_HT --> BLOCK
+    P --> BLOCK
+    H_W_BRIDGE --> BLOCK
+    DOMAIN_ID --> ACT_DEC
+
+    %% ============= OUTPUT =============
+    ACT_DEC --> PRED["predicted action chunk<br/>(B, 8, 7)<br/>shared-Q99 normalized"]
+    PRED --> LOSS["F.l1_loss(pred, target_action)<br/>masked by action_mask"]
+
+    %% ============= STYLES =============
+    classDef frozen fill:#cfe5ff,stroke:#1e6091,color:#0a1f33
+    classDef trainable fill:#ffe6a8,stroke:#a36b00,color:#3b2700
+    classDef io fill:#dfe7df,stroke:#3a6a3a,color:#1a3a1a
+    classDef tensor fill:#f5f5f5,stroke:#666,color:#222
+    class SIGLIP,Vision,EMBED,GEMMA frozen
+    class SCENE_PROJ,AQ,SP_HUB,PROP_PROJ,WRIST_PROJ,WRIST_PROJ_BR,BLOCK,LN1_FC1,LN2_FC2,ACT_DEC trainable
+    class SCENE,WRIST,PROMPT,PROPRIO,DOMAIN_ID,LOSS,PRED io
+    class SCENE_TOK,WRIST_LAST,WRIST_BR,SCENE_E,ACTION_E,SOFT_E,PROMPT_IDS,IP,HS,SLICE_HA,SLICE_HT,H_W,H_W_BRIDGE,P,X_INIT,TRIM,SCATTER,PLE tensor

@@ -1,0 +1,67 @@
+# V10: warm gating init for wrist_bridge + task cross-attn streams.
+#
+# v9 step_2500 diagnostic on 2026-05-03 confirmed gating_factor and
+# gating_factor_wrist remain at ~0.001 magnitude (tanh ≈ 0). With bs=8
+# (vs reference's effective bs=32 from 2-GPU DDP), the gating ramp is
+# ~4x slower than the reference's. The model collapses to constant
+# prediction because cross-attn streams (h_t, h_w_bridge) contribute
+# essentially nothing.
+#
+# v10 fix: gating_init=0.5 / gating_init_wrist=0.5 (atanh-space). Initial
+# tanh(0.5) ≈ 0.46, so cross-attn streams contribute ~46% of the
+# pre-softmax score weight from step 1. This bootstraps obs-conditioning
+# learning instead of waiting for the slow ramp.
+#
+# Architecture and other hyperparams identical to v9 (bs=8, lr=2e-4,
+# wd=0.01, clip=1.0, num_blocks=24, legacy block, ref input layout, ref
+# prompt fmt, LoRA r=64).
+seed: 0
+model:
+  num_domains: 1
+  hidden_dim: 1536
+  num_blocks: 24
+  use_grad_checkpoint: true
+  use_wrist_bridge: true
+  gating_init: 0.5
+  gating_init_wrist: 0.5
+  lora:
+    r: 64
+    alpha: 128
+    target_modules: [q_proj, v_proj]
+    dropout: 0.0
+vision:
+  model_name: google/siglip-so400m-patch14-224
+language:
+  model_name: google/gemma-4-E2B
+data:
+  type: libero_lerobot_real
+  repo_id: lerobot/libero_spatial_image
+  stats_path: data/norm_stats/libero_spatial.json
+  unnorm_key: libero_spatial_no_noops
+  fps: 10
+  download_videos: false
+  domain_id: 0
+  last_action_chunk_mode: zero
+train:
+  batch_size: 8
+  lr: 2.0e-4
+  weight_decay: 0.01
+  max_steps: 10000
+  freeze_steps: 0
+  warmup_steps: 500
+  min_lr_ratio: 1.0
+  grad_clip_norm: 1.0
+  lr_coefs:
+    gemma_lora:     0.1
+    siglip:         0.1
+    soft_prompts:   0.1
+    action_queries: 1.0
+    projections:    1.0
+    action_head:    1.0
+  save_every: 2500
+  save_dir: outputs/libero_spatial_v10/checkpoints
+wandb:
+  enabled: true
+  project: vla-project
+  name: libero_spatial_v10_warm_gating
+  tags: [libero_spatial, bridge_form, legacy_block, num_blocks_24, ref_layout, ref_prompt_fmt, wrist_bridge, warm_gating]

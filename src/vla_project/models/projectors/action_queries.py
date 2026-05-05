@@ -15,8 +15,13 @@ class ActionQueryHub(nn.Module):
         super().__init__()
         self.num_queries = num_queries
         self.hidden_dim = hidden_dim
+        # Match vla-gemma-4 73% baseline:
+        # ``action_queries = nn.Embedding(NUM, dim); weight.data.zero_()``.
+        # Earlier we used N(0, 0.02²) which gave per-position random offsets
+        # while the reference starts every position from the same zero
+        # vector and lets gradient differentiate them via RoPE-rotated
+        # queries.
         self.queries = nn.Parameter(torch.zeros(num_queries, hidden_dim))
-        nn.init.normal_(self.queries, std=0.02)
 
     def forward(self, batch_size: int) -> torch.Tensor:
         return self.queries.unsqueeze(0).expand(

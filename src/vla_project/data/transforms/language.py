@@ -7,6 +7,17 @@ straight into the project's internal Batch schema.
 
 The tokenizer is loaded via `AutoTokenizer.from_pretrained` and is **not**
 fine-tuned. It is instantiated once per dataset (or process) and reused.
+
+Prompt template (matches vla-gemma-4 73% baseline + VLA-Adapter reference
+``prismatic/vla/datasets/datasets.py:66``):
+
+    What action should the robot take to {instruction}?
+
+The raw LIBERO instruction is lowercased and stripped before interpolation.
+``add_special_tokens=False`` is forced so no implicit BOS is added; the
+``InputPacker`` prepends BOS itself and an extra leading BOS would shift all
+RoPE positions for the prompt by one, breaking compatibility with the
+reference layout.
 """
 from __future__ import annotations
 
@@ -15,6 +26,13 @@ from typing import Dict, List
 import torch
 
 from vla_project.data import constants as C
+
+
+_PROMPT_TEMPLATE = "What action should the robot take to {lang}?"
+
+
+def _format_prompt(text: str) -> str:
+    return _PROMPT_TEMPLATE.format(lang=text.lower().strip())
 
 
 class GemmaPromptTokenizer:
@@ -41,11 +59,12 @@ class GemmaPromptTokenizer:
 
     def __call__(self, text: str) -> Dict[str, torch.Tensor]:
         enc = self._tok(
-            text,
+            _format_prompt(text),
             max_length=self.max_len,
             padding="max_length",
             truncation=True,
             return_tensors="pt",
+            add_special_tokens=False,
         )
         # AutoTokenizer returns [1, L]; squeeze to [L].
         return {
@@ -55,11 +74,12 @@ class GemmaPromptTokenizer:
 
     def batch(self, texts: List[str]) -> Dict[str, torch.Tensor]:
         enc = self._tok(
-            texts,
+            [_format_prompt(t) for t in texts],
             max_length=self.max_len,
             padding="max_length",
             truncation=True,
             return_tensors="pt",
+            add_special_tokens=False,
         )
         return {
             "input_ids": enc["input_ids"].to(torch.long),

@@ -42,6 +42,9 @@ class _StubAcceleratorWithLog:
     def backward(self, loss):
         loss.backward()
 
+    def clip_grad_norm_(self, params, max_norm):
+        return torch.nn.utils.clip_grad_norm_(params, max_norm)
+
     def gather_for_metrics(self, t):
         return t.unsqueeze(0)
 

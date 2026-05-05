@@ -1,0 +1,53 @@
+# Tiniest possible overfit: max 50 samples (~12 batches at bs=4) of one task.
+# If even THIS plateaus high, the head architecture has a real capacity issue.
+# If it converges to near-zero, the multi-batch plateau is data-variance,
+# not architectural.
+seed: 0
+model:
+  num_domains: 1
+  hidden_dim: 1536
+  num_blocks: 35
+  use_grad_checkpoint: true
+  lora:
+    r: 64
+    alpha: 128
+    target_modules: [q_proj, v_proj]
+    dropout: 0.0
+vision:
+  model_name: google/siglip-so400m-patch14-224
+language:
+  model_name: google/gemma-4-E2B
+data:
+  type: libero_lerobot_real
+  repo_id: lerobot/libero_spatial_image
+  stats_path: data/norm_stats/libero_spatial.json
+  unnorm_key: libero_spatial_no_noops
+  fps: 10
+  task_index_filter: 0
+  max_samples: 50
+  download_videos: false
+  domain_id: 0
+  last_action_chunk_mode: zero
+train:
+  batch_size: 4
+  lr: 3.0e-4
+  weight_decay: 0.0
+  max_steps: 3000
+  freeze_steps: 0
+  warmup_steps: 100
+  min_lr_ratio: 1.0
+  grad_clip_norm: 10.0
+  lr_coefs:
+    gemma_lora:     0.1
+    siglip:         0.1
+    soft_prompts:   0.1
+    action_queries: 1.0
+    projections:    1.0
+    action_head:    1.0
+  save_every: 1500
+  save_dir: outputs/_overfit_tiny/checkpoints
+wandb:
+  enabled: true
+  project: vla-project
+  name: libero_spatial_overfit_tiny_50samples
+  tags: [libero_spatial, overfit, tiny, capacity_test]

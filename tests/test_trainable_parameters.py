@@ -17,7 +17,7 @@ def test_stage1_freeze_policy_only_adapters_trainable():
 
     trainable_names = {n for n, p in policy.named_parameters() if p.requires_grad}
     expected_prefixes = (
-        "scene_proj", "wrist_proj", "proprio_proj", "last_action_proj",
+        "scene_proj", "wrist_proj", "proprio_proj",
         "action_decoder", "soft_prompt_hub", "action_query_hub", "action_head",
     )
     for n in trainable_names:

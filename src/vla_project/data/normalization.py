@@ -24,7 +24,7 @@ def denormalize(x: torch.Tensor, stats: NormalizationStats) -> torch.Tensor:
 
 import json
 from pathlib import Path
-from typing import Union
+from typing import Any, Dict, Union
 
 
 @dataclass
@@ -65,6 +65,83 @@ def load_q99_stats(path: Union[str, Path], unnorm_key: str) -> Q99Stats:
             f"q01/q99/mask shape mismatch: {q01.shape}, {q99.shape}, {mask.shape}"
         )
     return Q99Stats(q01=q01, q99=q99, mask=mask)
+
+
+def load_norm_stats_payload(path: Union[str, Path], unnorm_key: str) -> Dict[str, Any]:
+    """Load the raw per-dataset normalization stats block for checkpoint metadata.
+
+    The returned dict is JSON-compatible and includes every block present in
+    ``dataset_statistics.json`` (typically ``action`` and ``proprio``). Keeping
+    this in checkpoints makes eval reproducible without relying on a sidecar
+    config path.
+    """
+    payload = json.loads(Path(path).read_text())
+    if unnorm_key not in payload:
+        raise KeyError(
+            f"unnorm_key {unnorm_key!r} not in {path}; available: {list(payload.keys())}"
+        )
+    return {unnorm_key: payload[unnorm_key]}
+
+
+def q99_stats_from_block(block: Dict[str, Any]) -> Q99Stats:
+    """Build ``Q99Stats`` from an ``action`` or ``proprio`` stats block."""
+    q01 = torch.as_tensor(block["q01"], dtype=torch.float32)
+    q99 = torch.as_tensor(block["q99"], dtype=torch.float32)
+    if "mask" in block:
+        mask = torch.as_tensor(block["mask"], dtype=torch.bool)
+    else:
+        mask = torch.ones_like(q01, dtype=torch.bool)
+    if not (q01.shape == q99.shape == mask.shape):
+        raise ValueError(
+            f"q01/q99/mask shape mismatch: {q01.shape}, {q99.shape}, {mask.shape}"
+        )
+    return Q99Stats(q01=q01, q99=q99, mask=mask)
+
+
+def load_q99_proprio_stats(path: Union[str, Path], unnorm_key: str) -> "Q99Stats | None":
+    """Load BOUNDS_Q99 stats for the proprio block (``payload[key]["proprio"]``).
+
+    Returns ``None`` if the entry is missing, so callers can opt out of
+    normalization with a clear "stats not present" code path. The 73%
+    vla-gemma-4 baseline trained with proprio-normalized inputs (RLDS
+    auto-normalization); a stats file without proprio means train/eval
+    would feed the model raw axis-angle/m units, which the proprio_proj
+    DA-Linear cannot easily map to the LLM embedding scale.
+    """
+    payload = json.loads(Path(path).read_text())
+    if unnorm_key not in payload:
+        raise KeyError(
+            f"unnorm_key {unnorm_key!r} not in {path}; available: {list(payload.keys())}"
+        )
+    proprio = payload[unnorm_key].get("proprio")
+    if proprio is None or "q01" not in proprio or "q99" not in proprio:
+        return None
+    q01 = torch.as_tensor(proprio["q01"], dtype=torch.float32)
+    q99 = torch.as_tensor(proprio["q99"], dtype=torch.float32)
+    if "mask" in proprio:
+        mask = torch.as_tensor(proprio["mask"], dtype=torch.bool)
+    else:
+        mask = torch.ones_like(q01, dtype=torch.bool)
+    return Q99Stats(q01=q01, q99=q99, mask=mask)
+
+
+def normalize_proprio_q99(proprio_raw: torch.Tensor, stats: Q99Stats) -> torch.Tensor:
+    """BOUNDS_Q99 proprio normalization.
+
+    Same per-dim formula as ``normalize_action_q99`` (rescale (q01, q99) →
+    (-1, 1) where mask=True; passthrough where mask=False) and the same
+    clipping. Mirrors vla-gemma-4 ``vla_evaluation.normalize_proprio``.
+    """
+    if proprio_raw.shape[-1] != stats.q01.shape[0]:
+        raise ValueError(
+            f"proprio last dim {proprio_raw.shape[-1]} != stats dim {stats.q01.shape[0]}"
+        )
+    q01 = stats.q01.to(proprio_raw.dtype).to(proprio_raw.device)
+    q99 = stats.q99.to(proprio_raw.dtype).to(proprio_raw.device)
+    mask = stats.mask.to(proprio_raw.device)
+    denom = (q99 - q01).clamp_min(1e-8)
+    norm = (2.0 * (proprio_raw - q01) / denom - 1.0).clamp(-1.0, 1.0)
+    return torch.where(mask, norm, proprio_raw)
 
 
 def normalize_action_q99(action_raw: torch.Tensor, stats: Q99Stats) -> torch.Tensor:

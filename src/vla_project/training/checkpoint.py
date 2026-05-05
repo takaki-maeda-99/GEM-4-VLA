@@ -96,6 +96,7 @@ def load_checkpoint(
     model: nn.Module,
     *,
     optimizer: Optional[torch.optim.Optimizer] = None,
+    strict: bool = True,
 ) -> Dict[str, Any]:
     in_path = Path(in_dir)
     if not in_path.is_dir():
@@ -106,7 +107,20 @@ def load_checkpoint(
     meta_path = in_path / "meta.json"
 
     state = torch.load(model_pt, map_location="cpu", weights_only=True)
-    model.load_state_dict(state)
+    missing, unexpected = model.load_state_dict(state, strict=strict)
+    if not strict:
+        # Report what was skipped so the caller can sanity-check the load.
+        # Filter the obvious frozen-backbone ranges (vision_encoder.*, gemma.*)
+        # because those are not expected in adapter-only ckpts (e.g. ours, or
+        # the converted baseline ckpt — both store only trainable params).
+        rel_missing = [
+            k for k in missing
+            if not k.startswith(("vision_encoder.", "gemma."))
+        ]
+        if rel_missing:
+            print(f"[load_checkpoint] missing (random-init): {rel_missing[:8]} total={len(rel_missing)}")
+        if unexpected:
+            print(f"[load_checkpoint] unexpected keys (skipped): {unexpected[:8]} total={len(unexpected)}")
 
     if optimizer is not None:
         opt_pt = in_path / "optimizer.pt"

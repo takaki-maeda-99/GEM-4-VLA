@@ -1,0 +1,63 @@
+# V16: prompt_max_len=20 (matches baseline) + all v15 fixes.
+#
+# Cumulative diffs found vs vla-gemma-4 73% baseline + fixed:
+#   1. layout: [BOS][prompt][scene][PROPRIO][action][EOS] (v6)
+#   2. prompt format: "What action should the robot take to {lang}?"
+#      + add_special_tokens=False (v6)
+#   3. num_blocks=24, legacy MLPResNetBlock_Pro (v5)
+#   4. wrist_bridge per-layer SigLIP cross-attn (v9)
+#   5. ungated cross-attn streams (no tanh, fixed scale 1.0) (v11)
+#   6. proprio Q99 normalization (v12)
+#   7. SigLIP transform: Resize 248 + CenterCrop 224 (v13)
+#   8. AdamW betas (0.9, 0.999) PyTorch default (v14)
+#   9. action_queries zero init (v15)
+#   10. use_soft_prompt=False (v15)
+#   11. prompt_max_len 50 → 20 (this v16)
+#   12. Mode B: no LoRA, gemma fully frozen (v8)
+#   13. hyperparams: bs=8, lr=2e-4, wd=0.01, clip=1.0 (v7)
+seed: 0
+model:
+  num_domains: 1
+  hidden_dim: 1536
+  num_blocks: 24
+  use_grad_checkpoint: true
+  use_wrist_bridge: true
+  ungated_streams: true
+  use_soft_prompt: false
+  prompt_max_len: 20
+vision:
+  model_name: google/siglip-so400m-patch14-224
+language:
+  model_name: google/gemma-4-E2B
+data:
+  type: libero_lerobot_real
+  repo_id: lerobot/libero_spatial_image
+  stats_path: data/norm_stats/libero_spatial.json
+  unnorm_key: libero_spatial_no_noops
+  fps: 10
+  download_videos: false
+  domain_id: 0
+  last_action_chunk_mode: zero
+train:
+  batch_size: 8
+  lr: 2.0e-4
+  weight_decay: 0.01
+  max_steps: 10000
+  freeze_steps: 0
+  warmup_steps: 500
+  min_lr_ratio: 1.0
+  grad_clip_norm: 1.0
+  lr_coefs:
+    gemma_lora:     0.0
+    siglip:         0.0
+    soft_prompts:   0.0
+    action_queries: 1.0
+    projections:    1.0
+    action_head:    1.0
+  save_every: 2500
+  save_dir: outputs/libero_spatial_v16/checkpoints
+wandb:
+  enabled: true
+  project: vla-project
+  name: libero_spatial_v16_full_match
+  tags: [libero_spatial, full_match, mode_b, wrist_bridge, ungated, proprio_norm, siglip_resize_crop, adamw_default_betas, action_queries_zero_init, no_soft_prompt, prompt_max_len_20]

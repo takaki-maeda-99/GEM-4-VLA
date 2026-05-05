@@ -1,0 +1,30 @@
+seed: 7
+checkpoint:
+  path: /misc/dl00/takaki/vla-gemma-4/runs/gemma4/gemma-4-e2b+libero_spatial_no_noops+b16+lr-0.0002+wu-500+libero_b_siglip_10k_wristb_b16_v2/latest_checkpoint.pt
+model:
+  gemma_model_id: google/gemma-4-E2B
+  vision_backbone_type: siglip
+  siglip_use_tensor_transform: true
+  training_mode: speed
+  use_xvla_style: false
+  use_wrist_bridge: true
+  use_proper_ffn: false
+  wrist_bridge_layer_mode: per_layer
+  num_action_head_blocks: 24
+  max_soft_tokens: 280
+data:
+  unnorm_key: libero_spatial_no_noops
+  stats_path: /misc/dl00/takaki/vla-gemma-4/VLA-Adapter/outputs/LIBERO-Spatial-Pro/dataset_statistics.json
+robot:
+  bddl_path_root: /misc/dl00/takaki/vla-gemma-4/LIBERO/libero/libero/bddl_files
+  task_suite: libero_spatial
+  image_size: 256
+  libero_path: ${oc.env:LIBERO_PATH,/misc/dl00/takaki/vla-gemma-4/LIBERO}
+eval:
+  task_idxs: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+  num_episodes_per_task: 5
+  max_steps: 200
+  num_steps_wait: 5
+  video_dir: outputs/baseline_shim_eval/videos
+  video_ext: mp4
+  video_fps: 10

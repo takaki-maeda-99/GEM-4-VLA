@@ -1,0 +1,55 @@
+# V13: SigLIP transform fix (Resize 248 + CenterCrop 224) on top of v12.
+#
+# v12 was launched with our buggy SiglipImageTransform that did direct
+# Resize(224) — different field of view than the 73% baseline (which uses
+# timm SigLIP default: Resize 248 + CenterCrop 224 → drops ~12px each
+# edge). Killed v12 mid-training and re-launched as v13 after fixing
+# the transform. Now train images traverse the same crop pipeline as
+# vla-gemma-4 SigLIP encoder expects.
+#
+# All other v12 fixes retained: proprio Q99 normalization, Mode B (no
+# LoRA), ungated cross-attn streams, wrist_bridge.
+seed: 0
+model:
+  num_domains: 1
+  hidden_dim: 1536
+  num_blocks: 24
+  use_grad_checkpoint: true
+  use_wrist_bridge: true
+  ungated_streams: true
+vision:
+  model_name: google/siglip-so400m-patch14-224
+language:
+  model_name: google/gemma-4-E2B
+data:
+  type: libero_lerobot_real
+  repo_id: lerobot/libero_spatial_image
+  stats_path: data/norm_stats/libero_spatial.json
+  unnorm_key: libero_spatial_no_noops
+  fps: 10
+  download_videos: false
+  domain_id: 0
+  last_action_chunk_mode: zero
+train:
+  batch_size: 8
+  lr: 2.0e-4
+  weight_decay: 0.01
+  max_steps: 10000
+  freeze_steps: 0
+  warmup_steps: 500
+  min_lr_ratio: 1.0
+  grad_clip_norm: 1.0
+  lr_coefs:
+    gemma_lora:     0.0
+    siglip:         0.0
+    soft_prompts:   0.25
+    action_queries: 1.0
+    projections:    1.0
+    action_head:    1.0
+  save_every: 2500
+  save_dir: outputs/libero_spatial_v13/checkpoints
+wandb:
+  enabled: true
+  project: vla-project
+  name: libero_spatial_v13_siglip_transform_fix
+  tags: [libero_spatial, bridge_form, legacy_block, num_blocks_24, ref_layout, ref_prompt_fmt, wrist_bridge, ungated_streams, proprio_normalize, mode_b, siglip_resize_crop]

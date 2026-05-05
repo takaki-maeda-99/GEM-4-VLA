@@ -7,20 +7,42 @@ resized to SigLIP's 224x224, normalized by SigLIP statistics. Action chunks
 are normalized with BOUNDS_Q99 stats loaded from JSON. Prompts are tokenized
 with the project's `GemmaPromptTokenizer`.
 
-Single-domain only (Plan 1). `last_action_chunk` is zeros (cold-start; real
-prior-chunk fetching is Plan 3 / future work).
+Two ``action_format`` modes:
+
+- ``"native"``: the original LIBERO 7-dim delta-EE actions, normalized with
+  BOUNDS_Q99 (Q99Stats from ``stats_path``). chunk_len = ``action_chunk_len``.
+- ``"ee6d"``: X-VLA's common 20-dim ``[xyz, rot6d, gripper, 10×pad]`` action
+  built per anchor from ``observation.state``. ``action_chunk_len`` is
+  re-interpreted as the anchor count and ``anchor_window_s`` defines the
+  total time window. EE6D actions are NOT Q99-normalized — values are
+  already in reasonable ranges (xyz ~ meters, rot6d ∈ [-1, 1], gripper ∈
+  [0, 1], pad = 0).
+
+Single-domain only (Plan 1). With ``last_action_chunk_mode='zero'`` the
+past-chunk slot is filled with zeros; with ``'real'`` it carries the prior
+H actions / past N anchors fetched at negative offsets.
 """
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Union
+from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
 
 import torch
 from torch.utils.data import IterableDataset
 
 from vla_project.data import constants as C
-from vla_project.data.normalization import Q99Stats, load_q99_stats, normalize_action_q99
-from vla_project.data.transforms.image import SiglipImageTransform
+from vla_project.data.normalization import (
+    Q99Stats,
+    load_q99_proprio_stats,
+    load_q99_stats,
+    normalize_action_q99,
+    normalize_proprio_q99,
+)
+from vla_project.data.transforms.action_alignment import (
+    anchor_offsets,
+    ee_pose_to_action20,
+)
+from vla_project.data.transforms.image import DINOv2ImageTransform, SiglipImageTransform
 from vla_project.data.transforms.language import GemmaPromptTokenizer
 
 
@@ -47,37 +69,128 @@ class LeRobotLiberoDataset(IterableDataset):
         domain_id: int = 0,
         max_samples: Optional[int] = None,
         last_action_chunk_mode: str = "zero",
+        action_format: str = "native",
+        anchor_window_s: float = 0.0,
+        task_index_filter: Optional[int] = None,
+        include_scene_dinov2: bool = False,
+        include_wrist_dinov2: bool = False,
     ) -> None:
         super().__init__()
         if last_action_chunk_mode not in ("zero", "real"):
             raise ValueError(
                 f"last_action_chunk_mode must be 'zero' or 'real'; got {last_action_chunk_mode!r}"
             )
+        if action_format not in ("native", "ee6d"):
+            raise ValueError(
+                f"action_format must be 'native' or 'ee6d'; got {action_format!r}"
+            )
+        if action_format == "ee6d":
+            if action_chunk_len < 2:
+                raise ValueError(
+                    f"action_format='ee6d' needs action_chunk_len >= 2 anchors; got {action_chunk_len}"
+                )
+            if anchor_window_s <= 0:
+                raise ValueError(
+                    f"action_format='ee6d' needs anchor_window_s > 0; got {anchor_window_s}"
+                )
         global _LeRobotDatasetCls
         if _LeRobotDatasetCls is None:
             _LeRobotDatasetCls = _default_lerobot_cls()
-        # When mode='real', request 2H entries spanning [-H, H-1]/fps; first H
-        # are the prior chunk, last H are the target. When 'zero', only request
-        # the future chunk and pad last_action_chunk with zeros.
-        if last_action_chunk_mode == "real":
-            offsets = [(i - action_chunk_len) / fps for i in range(2 * action_chunk_len)]
-        else:
-            offsets = [i / fps for i in range(action_chunk_len)]
-        delta = {"action": offsets}
+        # Build delta_timestamps for the chunk we want.
+        # native: action chunk indexed by frames at [-H, H-1]/fps (real) or
+        #   [0, H-1]/fps (zero).
+        # ee6d:   observation.state at anchor times spaced over anchor_window_s.
+        #   spacing = window / (H - 1). Real mode uses the action-style 2H
+        #   pattern: past N at offsets [-N*sp, ..., -sp]; future N at [0, ..., window].
+        if action_format == "native":
+            if last_action_chunk_mode == "real":
+                offsets = [(i - action_chunk_len) / fps for i in range(2 * action_chunk_len)]
+            else:
+                offsets = [i / fps for i in range(action_chunk_len)]
+            delta = {"action": offsets}
+        else:  # ee6d
+            future_offs = anchor_offsets(anchor_window_s, action_chunk_len, fps)
+            spacing = anchor_window_s / (action_chunk_len - 1)
+            if last_action_chunk_mode == "real":
+                past_offs = [(k - action_chunk_len) * spacing for k in range(action_chunk_len)]
+                offsets = past_offs + future_offs
+            else:
+                offsets = list(future_offs)
+            delta = {"observation.state": offsets}
+        # tolerance_s=1e9 disables LeRobot's intra-episode timestamp-sync check
+        # at __init__. The check fires on lerobot/libero_*_image (v2.0->v3.0
+        # converted) because some intra-episode diffs do not equal 1/fps within
+        # the default 1e-4. Stats / training only need the action values; the
+        # tolerance is irrelevant. Same workaround as tools/compute_norm_stats.py.
         self.ds = _LeRobotDatasetCls(
             repo_id,
             delta_timestamps=delta,
             episodes=episodes,
             download_videos=download_videos,
+            tolerance_s=1e9,
         )
         self.action_chunk_len = action_chunk_len
         self.domain_id = int(domain_id)
         self.max_samples = max_samples
         self.last_action_chunk_mode = last_action_chunk_mode
+        self.action_format = action_format
+        self.anchor_window_s = float(anchor_window_s)
+        self.include_scene_dinov2 = bool(include_scene_dinov2)
+        self.include_wrist_dinov2 = bool(include_wrist_dinov2)
+        # Optional post-hoc task filter: skip samples whose task_index doesn't
+        # match. Use this when you need a single-task subset and the wrapped
+        # LeRobotDataset's ``episodes=[...]`` filter would mis-reindex (its
+        # ``episode_data_index`` ends up sized to the filter length but
+        # samples retain their ORIGINAL ``episode_index`` values, causing
+        # IndexError on _get_query_indices for non-contiguous filters).
+        self.task_index_filter = (
+            int(task_index_filter) if task_index_filter is not None else None
+        )
+        # Q99 stats only used in native mode; EE6D values are pre-bounded.
         self.stats: Q99Stats = load_q99_stats(stats_path, unnorm_key)
+        # Optional proprio stats: 73% vla-gemma-4 baseline trained with RLDS-
+        # auto-normalized proprio (BOUNDS_Q99). Without normalization the
+        # proprio_proj DA-Linear sees axis-angle/m units (z≈0.92-1.29, rx≈
+        # 2.78-3.28) that are far from the LLM embedding scale. Returns None
+        # when the stats file lacks a proprio block, preserving raw behavior
+        # for older configs / smoke tests; new datasets should ship with
+        # proprio q01/q99/mask alongside the action block.
+        self.proprio_stats: Optional[Q99Stats] = load_q99_proprio_stats(
+            stats_path, unnorm_key
+        )
         self.image_tx = SiglipImageTransform(size=C.SIGLIP_IMAGE_SIZE, training=False)
+        self.dinov2_image_tx = DINOv2ImageTransform(size=C.SIGLIP_IMAGE_SIZE)
         self.tokenizer = tokenizer
         self._task_idx_to_str: Dict[int, str] = self._build_task_map()
+        # Pre-compute the list of valid frame indices when task_index_filter is
+        # set. Iterating the full dataset and skipping at sample-load time is
+        # too slow (every skipped sample still pays full image-decode I/O); we
+        # walk the episode metadata + episode_data_index instead and restrict
+        # iteration to frames that belong to the target task. None means
+        # "iterate all frames", checked in __iter__.
+        self._task_filtered_indices: Optional[List[int]] = None
+        if self.task_index_filter is not None:
+            target_str = self._task_idx_to_str.get(self.task_index_filter)
+            if target_str is None:
+                raise ValueError(
+                    f"task_index_filter={self.task_index_filter} not in "
+                    f"task map (have {sorted(self._task_idx_to_str)})"
+                )
+            ep_meta = self.ds.meta.episodes
+            edi_from = self.ds.episode_data_index["from"]
+            edi_to = self.ds.episode_data_index["to"]
+            valid: List[int] = []
+            for ep_id, info in ep_meta.items():
+                tasks = info.get("tasks", [])
+                if target_str.strip() in {str(t).strip() for t in tasks}:
+                    f, t = int(edi_from[ep_id]), int(edi_to[ep_id])
+                    valid.extend(range(f, t))
+            if not valid:
+                raise ValueError(
+                    f"task_index_filter={self.task_index_filter} ({target_str!r}) "
+                    f"matched 0 episodes; check task index ↔ string mapping"
+                )
+            self._task_filtered_indices = valid
 
     def _build_task_map(self) -> Dict[int, str]:
         out: Dict[int, str] = {}
@@ -101,48 +214,89 @@ class LeRobotLiberoDataset(IterableDataset):
         return self.image_tx(lerobot_img)
 
     def _sample_to_batch_item(self, sample: Dict[str, Any]) -> Dict[str, torch.Tensor]:
-        scene = self._resize_image(sample["observation.images.image"])
-        wrist = self._resize_image(sample["observation.images.wrist_image"])
-        proprio = sample["observation.state"].to(torch.float32)
-        if proprio.shape != (C.PROPRIO_DIM,):
-            raise ValueError(f"proprio shape {tuple(proprio.shape)} != ({C.PROPRIO_DIM},)")
-        action_raw = sample["action"].to(torch.float32)
+        scene_raw = sample["observation.images.image"]
+        scene = self._resize_image(scene_raw)
+        wrist_raw = sample["observation.images.wrist_image"]
+        wrist = self._resize_image(wrist_raw)
         H = self.action_chunk_len
-        if self.last_action_chunk_mode == "real":
-            expected = (2 * H, C.ACTION_DIM)
-            if action_raw.shape != expected:
+
+        if self.action_format == "native":
+            proprio = sample["observation.state"].to(torch.float32)
+            if proprio.shape != (C.PROPRIO_DIM,):
                 raise ValueError(
-                    f"action shape {tuple(action_raw.shape)} != {expected} "
-                    f"(real-mode expects 2*H entries)"
+                    f"proprio shape {tuple(proprio.shape)} != ({C.PROPRIO_DIM},)"
                 )
-            past_raw = action_raw[:H]
-            future_raw = action_raw[H:]
-            last_action_chunk = normalize_action_q99(past_raw, self.stats)
-            target_action = normalize_action_q99(future_raw, self.stats)
-            # Zero-pad the past at episode start: LeRobot clamps offsets that
-            # fall before frame 0 to the first action, leaking spurious values.
-            frame_index_t = sample.get("frame_index")
-            if frame_index_t is not None:
-                fi = int(frame_index_t.item()) if torch.is_tensor(frame_index_t) else int(frame_index_t)
-                n_clamped = max(0, H - fi)
-                if n_clamped > 0:
-                    last_action_chunk = last_action_chunk.clone()
-                    last_action_chunk[:n_clamped] = 0.0
-        else:
-            if action_raw.shape != (H, C.ACTION_DIM):
-                raise ValueError(
-                    f"action shape {tuple(action_raw.shape)} != "
-                    f"({H}, {C.ACTION_DIM})"
+            action_raw = sample["action"].to(torch.float32)
+            if self.last_action_chunk_mode == "real":
+                expected = (2 * H, C.ACTION_DIM)
+                if action_raw.shape != expected:
+                    raise ValueError(
+                        f"action shape {tuple(action_raw.shape)} != {expected} "
+                        f"(real-mode expects 2*H entries)"
+                    )
+                past_raw = action_raw[:H]
+                future_raw = action_raw[H:]
+                last_action_chunk = normalize_action_q99(past_raw, self.stats)
+                target_action = normalize_action_q99(future_raw, self.stats)
+                # Zero-pad the past at episode start: LeRobot clamps offsets
+                # that fall before frame 0 to the first action, leaking values.
+                frame_index_t = sample.get("frame_index")
+                if frame_index_t is not None:
+                    fi = int(frame_index_t.item()) if torch.is_tensor(frame_index_t) else int(frame_index_t)
+                    n_clamped = max(0, H - fi)
+                    if n_clamped > 0:
+                        last_action_chunk = last_action_chunk.clone()
+                        last_action_chunk[:n_clamped] = 0.0
+            else:
+                if action_raw.shape != (H, C.ACTION_DIM):
+                    raise ValueError(
+                        f"action shape {tuple(action_raw.shape)} != "
+                        f"({H}, {C.ACTION_DIM})"
+                    )
+                target_action = normalize_action_q99(action_raw, self.stats)
+                last_action_chunk = torch.zeros(H, C.ACTION_DIM, dtype=torch.float32)
+        else:  # ee6d
+            state_chunk = sample["observation.state"].to(torch.float32)
+            if self.last_action_chunk_mode == "real":
+                expected_state = (2 * H, C.PROPRIO_DIM)
+                if state_chunk.shape != expected_state:
+                    raise ValueError(
+                        f"observation.state shape {tuple(state_chunk.shape)} != "
+                        f"{expected_state} (ee6d real-mode expects 2*N anchors)"
+                    )
+                past_state = state_chunk[:H]
+                future_state = state_chunk[H:]
+            else:
+                if state_chunk.shape != (H, C.PROPRIO_DIM):
+                    raise ValueError(
+                        f"observation.state shape {tuple(state_chunk.shape)} != "
+                        f"({H}, {C.PROPRIO_DIM})"
+                    )
+                past_state = None
+                future_state = state_chunk
+            # Current proprio is the t=0 anchor (first future entry).
+            proprio = future_state[0].clone()
+            target_action = ee_pose_to_action20(
+                future_state[..., :3], future_state[..., 3:7], future_state[..., 7:8]
+            )
+            if past_state is not None:
+                last_action_chunk = ee_pose_to_action20(
+                    past_state[..., :3], past_state[..., 3:7], past_state[..., 7:8]
                 )
-            target_action = normalize_action_q99(action_raw, self.stats)
-            last_action_chunk = torch.zeros(H, C.ACTION_DIM, dtype=torch.float32)
+                # LeRobot clamps offsets that fall before frame 0 to the first
+                # frame's state. For ee6d that's "robot at rest" — semantically
+                # correct, no masking needed.
+            else:
+                last_action_chunk = torch.zeros(H, 20, dtype=torch.float32)
 
         task_idx_t = sample["task_index"]
         task_idx = int(task_idx_t.item()) if torch.is_tensor(task_idx_t) else int(task_idx_t)
         prompt_text = self._task_idx_to_str.get(task_idx, "")
         prompt = self.tokenizer(prompt_text)
 
-        return {
+        if self.proprio_stats is not None:
+            proprio = normalize_proprio_q99(proprio, self.proprio_stats)
+        item = {
             "domain_id": torch.tensor(self.domain_id, dtype=torch.long),
             "scene_image": scene,
             "wrist_image": wrist,
@@ -152,18 +306,35 @@ class LeRobotLiberoDataset(IterableDataset):
             "last_action_chunk": last_action_chunk,
             "target_action": target_action,
             "action_mask": torch.ones(H, dtype=torch.bool),
+            # v36 wrist_in_llm contract: LeRobot LIBERO carries a wrist camera.
+            "wrist_mask": torch.tensor(True, dtype=torch.bool),
         }
+        if self.include_wrist_dinov2:
+            item["wrist_image_dinov2"] = self.dinov2_image_tx(wrist_raw)
+        if self.include_scene_dinov2:
+            item["scene_image_dinov2"] = self.dinov2_image_tx(scene_raw)
+        return item
 
     def __iter__(self) -> Iterator[Dict[str, torch.Tensor]]:
-        # Shard the frame range across DataLoader workers: worker 0 reads
-        # indices [0, N, 2N, ...], worker 1 reads [1, N+1, 2N+1, ...] etc.
-        # This avoids each worker iterating the full dataset (and yielding
-        # duplicate samples) under DataLoader(num_workers > 0).
+        # Shard + shuffle. Without shuffle, deterministic stride iteration
+        # produces highly-correlated batches (consecutive frames from the
+        # same episode) → high inter-batch loss variance, slow convergence.
+        # vla-gemma-4 RLDS pipeline uses shuffle_buffer_size=256000.
+        #
+        # Combined sharding: rank r, worker w out of (world_size W,
+        # num_workers N) reads indices [r*N + w, r*N + w + W*N, ...] of a
+        # SHUFFLED index permutation. Each (rank, worker) walks a disjoint
+        # stride of randomly-ordered frames, so batches mix episodes.
+        import os, random as _random
+        ddp_rank = int(os.environ.get("RANK", 0))
+        ddp_world = int(os.environ.get("WORLD_SIZE", 1))
         info = torch.utils.data.get_worker_info()
         if info is None:
-            start, stride = 0, 1
+            worker_id, num_workers = 0, 1
         else:
-            start, stride = info.id, info.num_workers
+            worker_id, num_workers = info.id, info.num_workers
+        start = ddp_rank * num_workers + worker_id
+        stride = ddp_world * num_workers
         emitted = 0
         expected_chunk_len = (
             2 * self.action_chunk_len
@@ -171,11 +342,23 @@ class LeRobotLiberoDataset(IterableDataset):
             else self.action_chunk_len
         )
         # Single-pass iteration. Trainer calls iter(dataloader) again to restart.
-        for i in range(start, len(self.ds), stride):
+        chunk_key = "action" if self.action_format == "native" else "observation.state"
+        # Build the per-rank/worker index list, then SHUFFLE it. Use a
+        # rank-and-worker-distinct seed so each rank/worker gets a different
+        # permutation but the SAME rank/worker is reproducible across epochs
+        # (no torch.utils.data state-tracking needed).
+        rng = _random.Random(start)  # seed = rank*N + worker_id
+        if self._task_filtered_indices is not None:
+            full_indices = list(self._task_filtered_indices[start::stride])
+        else:
+            full_indices = list(range(start, len(self.ds), stride))
+        rng.shuffle(full_indices)
+        indices = full_indices
+        for i in indices:
             if self.max_samples is not None and emitted >= self.max_samples:
                 return
             sample = self.ds[i]
-            if sample["action"].shape[0] != expected_chunk_len:
+            if sample[chunk_key].shape[0] != expected_chunk_len:
                 # delta_timestamps near episode end may yield a short chunk; skip.
                 continue
             yield self._sample_to_batch_item(sample)

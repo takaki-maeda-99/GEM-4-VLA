@@ -6,9 +6,9 @@ constructor reads env vars set by `accelerate launch`; in single-process
 mode it is a near-no-op.
 """
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -21,8 +21,69 @@ class TrainerConfig:
     max_steps: int = 100
     log_every: int = 10
     grad_clip_norm: float = 1.0
+    gradient_accumulation_steps: int = 1
     save_every: Optional[int] = None  # save every N steps; None disables periodic
     save_dir: Optional[str] = None    # parent dir for step_<N>/ checkpoints
+    # LR schedule: linear warmup over `warmup_steps`, then cosine decay to
+    # `min_lr_ratio * init_lr`. Defaults disable scheduling (warmup=0,
+    # min_lr_ratio=1.0 → constant LR per group).
+    warmup_steps: int = 0
+    min_lr_ratio: float = 1.0
+    # X-VLA-style stage curriculum:
+    #   - groups in `schedule_group_names`: get freeze (if also in
+    #     freeze_group_names) → warmup → cosine decay (set min_lr_ratio=1.0
+    #     to drop decay and keep flat-after-warmup).
+    #   - all other groups: constant lr at their initial coef × base.
+    # Defaults: backbone + soft prompts go through schedule; head /
+    # projections / action queries stay at full lr the whole time.
+    freeze_steps: int = 0
+    freeze_group_names: Tuple[str, ...] = ("gemma_lora", "siglip")
+    schedule_group_names: Tuple[str, ...] = ("gemma_lora", "siglip", "soft_prompts")
+    # Keys whose float tensors stay in their original dtype (do NOT cast to
+    # model_dtype). Default protects regression labels: bf16 target makes
+    # L1/MSE loss subtly lossy. Add ``loss_weight``, ``return_to_go``, etc.
+    # as appropriate for new tasks.
+    keep_dtype_keys: Tuple[str, ...] = ("target_action",)
+
+
+def _cast_tensor_to_device(t: torch.Tensor, device, model_dtype, keep_orig: bool) -> torch.Tensor:
+    t = t.to(device)
+    if t.is_floating_point() and not keep_orig:
+        t = t.to(model_dtype)
+    return t
+
+
+def _cast_batch(
+    batch: Any, device, model_dtype, keep_dtype_keys: Tuple[str, ...]
+) -> Any:
+    """Recursively move tensors in a batch to ``device`` and cast floats to
+    ``model_dtype``. Keys listed in ``keep_dtype_keys`` retain their original
+    float dtype (e.g. regression targets that the loss should compute in fp32).
+
+    Handles nested dicts (e.g. ``{"obs": {"image": ..., "proprio": ...}, "action": ...}``)
+    and tuples/lists. Non-tensor values pass through unchanged.
+    """
+    if isinstance(batch, dict):
+        out = {}
+        for k, v in batch.items():
+            keep = k in keep_dtype_keys
+            if torch.is_tensor(v):
+                out[k] = _cast_tensor_to_device(v, device, model_dtype, keep)
+            elif isinstance(v, dict):
+                out[k] = _cast_batch(v, device, model_dtype, keep_dtype_keys)
+            elif isinstance(v, (list, tuple)):
+                cast = [
+                    _cast_tensor_to_device(x, device, model_dtype, keep)
+                    if torch.is_tensor(x) else x
+                    for x in v
+                ]
+                out[k] = type(v)(cast)
+            else:
+                out[k] = v
+        return out
+    if torch.is_tensor(batch):
+        return _cast_tensor_to_device(batch, device, model_dtype, keep_orig=False)
+    return batch
 
 
 class Trainer:
@@ -38,7 +99,9 @@ class Trainer:
         self.cfg = cfg
         if accelerator is None:
             from accelerate import Accelerator
-            accelerator = Accelerator()
+            from vla_project.training.accelerate_utils import default_ddp_kwargs_handlers
+
+            accelerator = Accelerator(kwargs_handlers=default_ddp_kwargs_handlers())
         self.accelerator = accelerator
 
     def _save(
@@ -96,6 +159,20 @@ class Trainer:
         first_param = next(underlying.parameters())
         device = first_param.device
         model_dtype = first_param.dtype
+        accum_steps = max(1, int(self.cfg.gradient_accumulation_steps))
+
+        # Snapshot per-group initial lrs for the scheduler (each group keeps
+        # its own coefficient applied via build_optimizer; the scheduler only
+        # supplies a shared multiplier in [0, 1]).
+        initial_lrs = [g["lr"] for g in self.optimizer.param_groups]
+        group_names = [g.get("name", f"group_{i}") for i, g in enumerate(self.optimizer.param_groups)]
+        scheduler_active = (
+            self.cfg.warmup_steps > 0
+            or self.cfg.min_lr_ratio < 1.0
+            or self.cfg.freeze_steps > 0
+        )
+        if scheduler_active:
+            from vla_project.training.schedulers import linear_warmup_cosine
 
         losses: List[float] = []
         step = 0
@@ -104,31 +181,62 @@ class Trainer:
         # first JIT-warmed steps and noisy data-loading spikes).
         ema_step_s: Optional[float] = None
         ema_alpha = 0.1
+        accum_i = 0
+        accum_loss_sum = 0.0
+        self.optimizer.zero_grad()
         while step < self.cfg.max_steps:
             for batch in dataloader:
-                cast_batch = {}
-                for k, v in batch.items():
-                    if not torch.is_tensor(v):
-                        cast_batch[k] = v
-                        continue
-                    v = v.to(device)
-                    if v.is_floating_point():
-                        v = v.to(model_dtype)
-                    cast_batch[k] = v
-                batch = cast_batch
+                batch = _cast_batch(batch, device, model_dtype, self.cfg.keep_dtype_keys)
 
-                self.optimizer.zero_grad()
+                # Apply LR schedule for the upcoming optimizer step. `step` is
+                # 0-indexed here (incremented after optimizer.step below).
+                # Per-group: groups in schedule_group_names get freeze +
+                # warmup + (cosine decay if min_lr_ratio<1). Groups outside
+                # the list keep their initial constant lr.
+                if scheduler_active:
+                    for g, init, name in zip(
+                        self.optimizer.param_groups, initial_lrs, group_names
+                    ):
+                        if name not in self.cfg.schedule_group_names:
+                            g["lr"] = init  # constant
+                            continue
+                        eff_freeze = (
+                            self.cfg.freeze_steps
+                            if name in self.cfg.freeze_group_names
+                            else 0
+                        )
+                        mul = linear_warmup_cosine(
+                            step,
+                            freeze_steps=eff_freeze,
+                            warmup_steps=self.cfg.warmup_steps,
+                            total_steps=self.cfg.max_steps,
+                            base_lr=1.0,
+                            min_lr_ratio=self.cfg.min_lr_ratio,
+                        )
+                        g["lr"] = init * mul
+
                 _, loss = self.model(batch)
-                self.accelerator.backward(loss)
-                torch.nn.utils.clip_grad_norm_(
+                # Keep optimizer-step gradients equivalent to a large batch by
+                # averaging microbatch losses before backward. Reporting below
+                # logs the mean *raw* loss over the accumulation window.
+                self.accelerator.backward(loss / accum_steps)
+                accum_loss_sum += float(loss.detach().item())
+                accum_i += 1
+                if accum_i < accum_steps:
+                    continue
+                self.accelerator.clip_grad_norm_(
                     self.model.parameters(), self.cfg.grad_clip_norm
                 )
                 self.optimizer.step()
+                self.optimizer.zero_grad()
 
                 # Cross-rank average for reporting; single-GPU is a no-op.
-                gathered = self.accelerator.gather_for_metrics(loss.detach())
+                report_loss = loss.detach().new_tensor(accum_loss_sum / accum_steps)
+                gathered = self.accelerator.gather_for_metrics(report_loss)
                 loss_val = float(gathered.mean().item())
                 losses.append(loss_val)
+                accum_i = 0
+                accum_loss_sum = 0.0
 
                 step += 1
                 now = time.perf_counter()
@@ -145,15 +253,26 @@ class Trainer:
                 # at construction, this routes to wandb.log(..., step=step).
                 # Logged after step += 1 so the first call is step=1.
                 if hasattr(self.accelerator, "log"):
-                    self.accelerator.log(
-                        {
-                            "train/loss":         loss_val,
-                            "train/step_time_ms": step_time_s * 1000.0,
-                            "train/progress_pct": progress_pct,
-                            "train/eta_s":        eta_s,
-                        },
-                        step=step,
-                    )
+                    payload = {
+                        "train/loss":         loss_val,
+                        "train/step_time_ms": step_time_s * 1000.0,
+                        "train/progress_pct": progress_pct,
+                        "train/eta_s":        eta_s,
+                        "train/gradient_accumulation_steps": accum_steps,
+                    }
+                    # Per-group lr is informative when scheduling is active and
+                    # also useful as a sanity check for the per-group coefs.
+                    for name, g in zip(group_names, self.optimizer.param_groups):
+                        payload[f"train/lr/{name}"] = g["lr"]
+                    # EE6D (or any other model that exposes per-channel loss
+                    # components) attaches them under `_last_loss_info` so we
+                    # can plot pos / rot / grip separately without changing
+                    # the forward() signature.
+                    extra = getattr(underlying, "_last_loss_info", None)
+                    if extra:
+                        for k, v in extra.items():
+                            payload[k] = float(v.item()) if torch.is_tensor(v) else float(v)
+                    self.accelerator.log(payload, step=step)
 
                 # Periodic save (only when both save_every and save_dir set).
                 if (
@@ -167,8 +286,15 @@ class Trainer:
                 if step >= self.cfg.max_steps:
                     break
 
-        # Final save at end of fit (always when save_dir is set).
-        if self.cfg.save_dir is not None:
+        # Final save at end of fit. Skip when the most recent periodic save
+        # already wrote this step (max_steps a multiple of save_every) so we
+        # don't redo identical work.
+        periodic_just_fired = (
+            self.cfg.save_every is not None
+            and step > 0
+            and step % self.cfg.save_every == 0
+        )
+        if self.cfg.save_dir is not None and not periodic_just_fired:
             self._save(step, save_cfg, save_norm_stats, save_tokenizer_settings)
         # Close any open tracker run (no-op if none was initialized).
         if hasattr(self.accelerator, "end_training"):

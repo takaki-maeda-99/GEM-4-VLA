@@ -23,6 +23,7 @@ dependencies = [
     "matplotlib>=3.10.9",
     "gym==0.25.2",
     "wandb>=0.24.2",
+    "deepspeed>=0.18.9",
 ]
 
 [project.optional-dependencies]
