@@ -84,6 +84,30 @@ uv run python scripts/eval.py configs/eval/libero_v33_step10000.yaml
 Eval rolls out 50 episodes per suite; metrics + per-task results write to
 `outputs/<run>/eval/`. MP4 videos are optional (`save_video: true`).
 
+## Inference server (Phase 0)
+
+FastAPI HTTP server hosting an X-VLA-Adapter checkpoint behind MimicRec's
+`POST /predict` contract. Phase 0 ships `HoldPositionChunkPredictor`
+end-to-end (no GPU / no ckpt required) — useful for wire-format smoke. The
+real-model `XVLAAdapterChunkPredictor` is a stub awaiting v36 ckpt training.
+
+```bash
+# HoldPosition mode (Phase 0; immediate)
+uv run python scripts/serve.py \
+  --predictor hold_position \
+  --deploy-config configs/deploy/v36_libero_spatial.yaml \
+  --domain-id 0 \
+  --port 8001
+
+# Verify
+curl http://127.0.0.1:8001/healthz
+# {"status":"ok","predictor":"HoldPositionChunkPredictor","ready_at_ns":...}
+```
+
+For details (XVLAAdapter mode, deploy yaml authoring, ckpt swap, known
+limitations) see [`src/vla_project/deployment/README.md`](src/vla_project/deployment/README.md).
+Design + plan live under [`docs/superpowers/`](docs/superpowers/).
+
 ## Configuration model
 
 Every architecture revision is a config file, not scattered code edits.
