@@ -6,11 +6,11 @@
 #
 # Diffs from the bs=16 config:
 #   - train.batch_size: 16 → 8 (per-rank; eff_bs 64 → 32)
+#   - train.freeze_steps: 10000 → 5000 (10% → 5% of max_steps; gemma_lora
+#     starts learning earlier)
 #   - train.warmup_steps: 5000 → 2500 (5% → 2.5% of max_steps)
 #   - train.save_every: 10000 → 5000 (defense in depth — bs=16 run lost
 #     7k steps because save_every=10000 had not fired)
-#   - model.lora.r: 64 → 32, model.lora.alpha: 128 → 64
-#     (alpha/r = 2 preserved; halves LoRA params)
 #
 # Hardware: 4× RTX 6000 Ada 49GB (NUMA0 GPU 0-3), DDP intra-NUMA PCIe.
 # LR kept at 2e-4 (no scaling for the eff_bs reduction; same "安全側" as
@@ -58,8 +58,8 @@ model:
   freeze_action_queries: false
   wrap_llm_in_no_grad: false
   lora:
-    r: 32                                  # ↓ from 64
-    alpha: 64                              # ↓ from 128 (alpha/r=2 preserved)
+    r: 64
+    alpha: 128
     target_modules: [q_proj, v_proj]
     dropout: 0.0
 vision:
@@ -108,7 +108,7 @@ train:
   lr: 2.0e-4                               # 安全側、eff_bs 32 でも no linear scale
   weight_decay: 0.01
   max_steps: 100000
-  freeze_steps: 10000                      # 10% (gemma_lora freeze)
+  freeze_steps: 5000                       # ↓ from 10000 (5%)
   warmup_steps: 2500                       # ↓ from 5000 (2.5%)
   freeze_group_names: [gemma_lora]
   schedule_group_names: [gemma_lora, action_queries, scene_projection, soft_prompts]
@@ -131,5 +131,5 @@ train:
 wandb:
   enabled: true
   project: vla-project
-  name: oxe_pretrain_v37_nb18even_dl50_4gpu_bs8_compile_lora32
-  tags: [oxe_pretrain, rlds, multidomain, da_2layer, soft_prompt_llm, wrist_in_llm, wrist_drop02, lora_r32, 9_domains, dl50, 4gpu, bs8, nb18, even, compile_default, gc_off, scratch]
+  name: oxe_pretrain_v37_nb18even_dl50_4gpu_bs8_compile_freeze5k
+  tags: [oxe_pretrain, rlds, multidomain, da_2layer, soft_prompt_llm, wrist_in_llm, wrist_drop02, lora_r64, 9_domains, dl50, 4gpu, bs8, nb18, even, compile_default, gc_off, scratch, freeze5k]
