@@ -145,6 +145,7 @@ class Trainer:
         save_cfg: Any = None,
         save_norm_stats: Optional[Dict[str, Any]] = None,
         save_tokenizer_settings: Optional[Dict[str, Any]] = None,
+        start_step: int = 0,
     ) -> List[float]:
         """Train for exactly ``max_steps`` optimizer steps.
 
@@ -152,6 +153,10 @@ class Trainer:
             dataloader: any iterable of batch dicts.
             save_cfg / save_norm_stats / save_tokenizer_settings: optional
                 metadata bundled into checkpoints when ``cfg.save_dir`` is set.
+            start_step: optional starting step for crash recovery via
+                ``cfg.train.resume_full_state``. The LR scheduler reads the
+                step counter directly so warmup/freeze positions resume
+                correctly. Defaults to 0 (fresh run).
         """
         self.model.train()
         # Accelerator.prepare wraps model/optimizer/dataloader for the active
@@ -183,7 +188,7 @@ class Trainer:
 
         losses: List[float] = []
         nan_skip_count = 0
-        step = 0
+        step = int(start_step)
         last_t = time.perf_counter()
         # Exponential moving average of step time for ETA (smooths out the
         # first JIT-warmed steps and noisy data-loading spikes).

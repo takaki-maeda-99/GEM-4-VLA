@@ -112,32 +112,30 @@ def _build_dataloader(cfg: DictConfig, prompt_max_len: int, language_model_name:
             collate_fn=RLDSLiberoDataset.collate_fn,
         )
     if data_type == "oxe_rlds_multidomain":
-        # v37 OXE single-arm 6DOF+Gripper multi-domain pretrain. Same shape as
-        # libero_rlds_multidomain but uses RLDSOxeDataset (generic OXE wrapper
-        # with wrist_mask derived from RLDS pad_mask_dict and action/proprio
-        # contract checks). Per-dataset domain_id, RLDS per-suite Q99 stats by
-        # default. ``shared_stats_path`` is intentionally NOT supported here:
-        # OXE per-dataset action distributions differ enough that combining
+        # v37 OXE single-arm 6DOF+Gripper multi-domain pretrain. Uses
+        # RLDSOxeMultiDataset which builds ONE tf.data graph
+        # (sample_from_datasets over N sources + a single shuffle buffer)
+        # instead of N independent shuffle buffers. The N-buffer variant
+        # held ~286 GB rank-0 host RAM (9 sources × 65 K elements × encoded
+        # JPEG bytes); the single-buffer variant cuts that to ~30 GB.
+        # ``shared_stats_path`` is intentionally NOT supported here: OXE
+        # per-dataset action distributions differ enough that combining
         # would collapse useful per-domain calibration; per-domain DA-2-MLP
         # rows handle the distribution gap instead.
         tok = GemmaPromptTokenizer(model_name=language_model_name, max_len=prompt_max_len)
-        from vla_project.data.datasets.rlds_oxe_dataset import RLDSOxeDataset
+        from vla_project.data.datasets.rlds_oxe_multi_dataset import RLDSOxeMultiDataset
         if cfg.data.get("shared_stats_path", None):
             raise ValueError(
                 "shared_stats_path is not supported for oxe_rlds_multidomain; "
                 "OXE distributions are per-dataset (use per-domain DA rows)."
             )
-        # Validate domain_id contract before building children: must be unique,
-        # non-negative, and 0 <= id < cfg.model.num_domains. Catches config drift
-        # (adding a source without bumping num_domains) before the trainer runs
-        # an out-of-range nn.Embedding lookup mid-batch.
-        sources = list(cfg.data.sources)
-        if len(sources) == 0:
+        sources_cfg = list(cfg.data.sources)
+        if len(sources_cfg) == 0:
             raise ValueError("oxe_rlds_multidomain: cfg.data.sources is empty")
-        names = [str(src.dataset_name) for src in sources]
+        names = [str(src.dataset_name) for src in sources_cfg]
         if len(set(names)) != len(names):
             raise ValueError(f"oxe_rlds_multidomain: duplicate dataset_name: {names!r}")
-        ids = [int(src.domain_id) for src in sources]
+        ids = [int(src.domain_id) for src in sources_cfg]
         if any(i < 0 for i in ids):
             raise ValueError(f"oxe_rlds_multidomain: domain_id must be >= 0; got {ids!r}")
         if len(set(ids)) != len(ids):
@@ -153,32 +151,25 @@ def _build_dataloader(cfg: DictConfig, prompt_max_len: int, language_model_name:
                 f"oxe_rlds_multidomain: len(sources)={len(ids)} != "
                 f"cfg.model.num_domains={nd}; per-dataset DA expects 1:1"
             )
-        children: list = []
-        weights: list = []
-        for src in sources:
-            children.append(RLDSOxeDataset(
-                data_dir=cfg.data.data_dir,
-                dataset_name=str(src.dataset_name),
-                tokenizer=tok,
-                action_chunk_len=int(cfg.data.get("action_chunk_len", 8)),
-                shuffle_buffer_size=int(cfg.data.get("shuffle_buffer_size", 65536)),
-                train=bool(cfg.data.get("train", True)),
-                domain_id=int(src.domain_id),
-                seed=int(cfg.data.get("seed", 42)) + int(src.domain_id),
-                include_scene_dinov2=include_scene_dinov2,
-                include_wrist_dinov2=include_wrist_dinov2,
-            ))
-            weights.append(float(src.weight))
-        ds = WeightedMultiDataset(children, weights, seed=int(cfg.data.get("seed", 0)))
-        # cfg.train.num_workers: DataLoader worker count. For IterableDataset
-        # each worker spawns a subprocess running its own RLDS pipeline
-        # (memory ~RAM × num_workers per rank). num_workers=0 keeps everything
-        # in the main process; safe default. Bump to 1-2 only if GPU shows
-        # data-fetch stalls (util drops < 100% periodically).
+        sources = [
+            (str(src.dataset_name), int(src.domain_id), float(src.weight))
+            for src in sources_cfg
+        ]
+        ds = RLDSOxeMultiDataset(
+            data_dir=cfg.data.data_dir,
+            sources=sources,
+            tokenizer=tok,
+            action_chunk_len=int(cfg.data.get("action_chunk_len", 8)),
+            shuffle_buffer_size=int(cfg.data.get("shuffle_buffer_size", 65536)),
+            train=bool(cfg.data.get("train", True)),
+            seed=int(cfg.data.get("seed", 42)),
+            include_scene_dinov2=include_scene_dinov2,
+            include_wrist_dinov2=include_wrist_dinov2,
+        )
         nw = int(cfg.train.get("num_workers", 0))
         return DataLoader(
             ds, batch_size=cfg.train.batch_size,
-            collate_fn=RLDSOxeDataset.collate_fn,
+            collate_fn=RLDSOxeMultiDataset.collate_fn,
             num_workers=nw,
             persistent_workers=(nw > 0),
         )
@@ -421,6 +412,36 @@ def main(cfg_path: str) -> None:
         lr_coefs=lr_coefs,
         optimizer_kind=str(cfg.train.get("optimizer_kind", "adamw")),
     )
+
+    # ``train.resume_full_state``: optional path to a step_<N>/ checkpoint
+    # saved by Trainer._save. Loads model state + optimizer state and starts
+    # the training loop at meta["step"]+1. Distinct from ``resume_ckpt`` —
+    # that one only loads weights (and applies DA row expansion when needed)
+    # and restarts the schedule from step 0. Use this for OOM-crash recovery
+    # to preserve adam moments and skip already-completed warmup/freeze.
+    #
+    # Trainer._save calls accelerator.unwrap_model before serializing, so the
+    # state_dict keys have no torch.compile / DDP prefix. If torch.compile
+    # wrapped policy above, target the underlying module via _orig_mod (its
+    # parameter tensors are the same objects, so optimizer refs stay valid).
+    start_step = 0
+    resume_full_state = cfg.train.get("resume_full_state", None)
+    if resume_full_state:
+        if resume_ckpt:
+            raise ValueError(
+                "resume_ckpt and resume_full_state are mutually exclusive; "
+                "use resume_full_state for crash recovery within the same run, "
+                "and resume_ckpt for fine-tuning a prior pretrain ckpt."
+            )
+        from vla_project.training.checkpoint import load_checkpoint
+        load_target = getattr(policy, "_orig_mod", policy)
+        meta = load_checkpoint(resume_full_state, load_target, optimizer=optim)
+        start_step = int(meta.get("step", 0))
+        print(
+            f"[train] resuming full state from {resume_full_state}: "
+            f"start_step={start_step}, optimizer state restored"
+        )
+
     # ``schedule_group_names`` / ``freeze_group_names`` default to
     # TrainerConfig's class defaults when not specified, but allow yaml
     # override so configs like v28 can extend warmup to action_queries /
@@ -452,6 +473,7 @@ def main(cfg_path: str) -> None:
             "model_name": cfg.language.model_name,
             "prompt_max_len": policy_cfg.prompt_max_len,
         },
+        start_step=start_step,
     )
     print(f"[train] losses={losses}")
 
