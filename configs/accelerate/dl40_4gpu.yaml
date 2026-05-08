@@ -1,0 +1,18 @@
+# Accelerate launch preset for dl40: 4x A100 40GB.
+# Used for v37 FT to keep effective batch = 16 with bs=4 per GPU on 40GB cards.
+# GPUs selected via CUDA_VISIBLE_DEVICES (typically 2,3,4,5 — spans NUMA 0+1
+# but NCCL_P2P_DISABLE=1 in env handles the cross-socket case).
+compute_environment: LOCAL_MACHINE
+distributed_type: MULTI_GPU
+downcast_bf16: 'no'
+machine_rank: 0
+main_training_function: main
+mixed_precision: bf16
+num_machines: 1
+num_processes: 4
+rdzv_backend: static
+same_network: true
+tpu_env: []
+tpu_use_cluster: false
+tpu_use_sudo: false
+use_cpu: false
