@@ -1,4 +1,4 @@
-"""FastAPI app factory + /predict + /healthz routes.
+"""FastAPI app factory + /predict + /healthz + /admin/schema routes.
 
 Reads deploy yaml + (optionally) ckpt meta.json, constructs DomainAdapter
 and ChunkPredictor, mounts the FastAPI app. See spec §Section 6 for

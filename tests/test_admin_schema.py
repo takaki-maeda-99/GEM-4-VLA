@@ -5,11 +5,10 @@ Returns 9 top-level keys (predictor, ckpt, wrist_hard_required, request_fields,
 proprio, image, instruction, prompt, proprio_ood). prompt.max_tokens is null in
 both Phase 0 modes (Phase 0 deferral — server doesn't tokenize yet).
 """
-import json
-from pathlib import Path
-
 import pytest
 from fastapi.testclient import TestClient
+
+from tests.conftest import write_synthetic_ckpt
 
 from vla_project.deployment.domain_adapter import (
     IMAGE_MAX_SIDE,
@@ -100,6 +99,7 @@ def test_admin_schema_request_fields_match_deploy_yaml(hold_position_client):
     data = hold_position_client.get("/admin/schema").json()
     rf = data["request_fields"]
     assert rf["scene_image"] == "image_primary"
+    assert rf["wrist_image"] == "image_wrist"
     assert rf["proprio"] == "proprio"
     assert rf["instruction"] == "instruction"
 
@@ -124,38 +124,9 @@ def test_admin_schema_wrist_hard_required_is_bool(hold_position_client):
 # ----- xvla_adapter mode (synthetic ckpt) -----
 
 
-def _write_synthetic_ckpt(tmp_path: Path, *, use_wrist_bridge: bool = False) -> Path:
-    """Phase 0 ckpt with the minimal meta.json keys the validator demands.
-    Pattern copied from test_serve_smoke.py:test_predict_hard_required_wrist_missing."""
-    ckpt_dir = tmp_path / "fake_v36"
-    ckpt_dir.mkdir()
-    meta = {
-        "step": 0,
-        "cfg": {
-            "model": {
-                "num_domains": 1,
-                "use_wrist_bridge": use_wrist_bridge,
-                "wrist_in_llm": False,
-                "wrist_view_dropout_p": 0.0,
-            },
-            "data": {"unnorm_key": "libero_spatial_no_noops", "action_chunk_len": 8},
-        },
-        "norm_stats": {
-            "libero_spatial_no_noops": {
-                "action": {"mean": [0.0]*7, "std": [1.0]*7, "q01": [-1.0]*7,
-                           "q99": [1.0]*7, "mask": [True]*6 + [False]},
-                "proprio": {"mean": [0.0]*8, "std": [1.0]*8, "q01": [-1.0]*8,
-                            "q99": [1.0]*8, "mask": [True]*8},
-            }
-        },
-    }
-    (ckpt_dir / "meta.json").write_text(json.dumps(meta))
-    return ckpt_dir
-
-
 @pytest.fixture
 def xvla_adapter_client(tmp_path):
-    ckpt_dir = _write_synthetic_ckpt(tmp_path, use_wrist_bridge=False)
+    ckpt_dir = write_synthetic_ckpt(tmp_path, use_wrist_bridge=False)
     app = build_app(
         predictor_kind="xvla_adapter",
         checkpoint=ckpt_dir,
@@ -167,7 +138,7 @@ def xvla_adapter_client(tmp_path):
 
 @pytest.fixture
 def xvla_adapter_wrist_required_client(tmp_path):
-    ckpt_dir = _write_synthetic_ckpt(tmp_path, use_wrist_bridge=True)
+    ckpt_dir = write_synthetic_ckpt(tmp_path, use_wrist_bridge=True)
     app = build_app(
         predictor_kind="xvla_adapter",
         checkpoint=ckpt_dir,
