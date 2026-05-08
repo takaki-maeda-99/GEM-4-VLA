@@ -31,6 +31,7 @@ dependencies = [
     "dlimp @ git+https://github.com/moojink/dlimp_openvla@040105d256bd28866cc6620621a3d5f7b6b91b46",  # OXE/RLDS pipeline; transitively pulls tensorflow==2.15.0 + tensorflow_datasets>=4.9.2
     "tensorflow-graphics>=2021.12",  # imported by prismatic/vla/datasets/rlds/oxe/utils/droid_utils.py (zero_action_filter)
     "bitsandbytes>=0.41",  # NF4 backbone quantization + AdamW8bit (optimizer_kind="adamw_8bit")
+    "timm>=1.0.26",
 ]
 
 [project.optional-dependencies]
