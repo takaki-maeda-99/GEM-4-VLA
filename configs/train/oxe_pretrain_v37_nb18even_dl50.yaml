@@ -20,7 +20,7 @@
 #   cd /misc/dl00/takaki/X-VLA-Adapter
 #   CUDA_VISIBLE_DEVICES=0,1,2,3 \
 #   PYTHONPATH=/misc/dl00/takaki/X-VLA-Adapter/src \
-#   nohup /misc/dl00/takaki/vla-gemma-4/.venv-gemma4/bin/accelerate launch \
+#   nohup /misc/dl00/takaki/X-VLA-Adapter/.venv/bin/accelerate launch \
 #     --config_file configs/accelerate/dl50_4gpu.yaml \
 #     scripts/train.py configs/train/oxe_pretrain_v37_nb18even_dl50.yaml \
 #     > outputs/oxe_pretrain_v37_nb18even_dl50/launch.log 2>&1 &

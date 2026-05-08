@@ -21,9 +21,9 @@ Adapted from ``rlds_libero_dataset.py``. Differences:
     (delta XYZ + RPY + gripper) and StateEncoding standardizes proprio
     to 8-dim — see VLA-Adapter/prismatic/vla/datasets/rlds/oxe/configs.py:43.
 
-Requires a venv with tensorflow + dlimp installed (we share
-``/misc/dl00/takaki/vla-gemma-4/.venv-gemma4`` for that). prismatic itself
-is vendored under ``src/prismatic/`` so PYTHONPATH=src/ is sufficient.
+Requires a venv with tensorflow + dlimp installed; the X-VLA-Adapter
+``.venv`` (built via ``uv sync``) covers this. prismatic itself is
+vendored under ``src/prismatic/`` so PYTHONPATH=src/ is sufficient.
 """
 from __future__ import annotations
 

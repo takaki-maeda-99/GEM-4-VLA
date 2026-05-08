@@ -14,10 +14,9 @@ Key differences from ``LeRobotLiberoDataset``:
   - Shuffle is handled inside RLDS (``shuffle_buffer_size`` arg). No need
     to shuffle ourselves.
 
-Requires a venv with tensorflow + dlimp installed; we share
-``/misc/dl00/takaki/vla-gemma-4/.venv-gemma4/bin/python`` for that.
-prismatic is vendored under ``src/prismatic/`` so PYTHONPATH=src/ is
-sufficient.
+Requires a venv with tensorflow + dlimp installed; the X-VLA-Adapter
+``.venv`` (built via ``uv sync``) covers this. prismatic is vendored
+under ``src/prismatic/`` so PYTHONPATH=src/ is sufficient.
 """
 from __future__ import annotations
 
