@@ -276,27 +276,18 @@ class Trainer:
                 # backward → clip_grad_norm_ (norm of NaN is NaN) →
                 # optimizer.step (param − lr × NaN = NaN) and poisons every
                 # trainable param. No recovery without rewinding to a ckpt,
-                # so discard the whole accumulation window when this happens.
-                #
-                # The check must be DDP-synchronized: rank-local randomness
-                # (e.g. wrist_view_dropout) means one rank can hit non-finite
-                # while others stay finite. Skipping on a strict subset of
-                # ranks desyncs the next backward/clip/step NCCL collectives,
-                # eventually triggering the watchdog timeout (1800 s) and a
-                # SIGABRT. ``accelerator.gather`` works in single-rank too
-                # (no-op).
-                loss_finite_local = torch.isfinite(loss).to(torch.uint8).view(1)
-                loss_finite_all = self.accelerator.gather(loss_finite_local)
-                if not bool(loss_finite_all.all().item()):
+                # so discard the whole accumulation window. v37 nb18even bs=8
+                # hit this at ~step 1k.
+                if not torch.isfinite(loss).item():
                     nan_skip_count += 1
                     self.optimizer.zero_grad()
                     accum_i = 0
                     accum_loss_sum = 0.0
                     if self.accelerator.is_main_process:
                         print(
-                            f"[WARN] step {step}: non-finite forward loss on "
-                            f"some rank (local={float(loss.detach()):.6g}); "
-                            f"skipping accumulation (total skipped: {nan_skip_count})",
+                            f"[WARN] step {step}: non-finite forward loss "
+                            f"({float(loss.detach()):.6g}); skipping accumulation "
+                            f"(total skipped: {nan_skip_count})",
                             flush=True,
                         )
                     continue
