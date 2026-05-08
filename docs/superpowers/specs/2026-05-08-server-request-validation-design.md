@@ -315,13 +315,13 @@ All 422 paths feed the existing `_log_request(... outcome="invalid_request" ...)
 
 ## Acceptance checklist
 
-- [ ] `schemas.py` keeps `extra="ignore"`; adds `instruction` byte validator + typo `model_validator`.
-- [ ] `domain_adapter.py` rejects NaN/inf proprio at preprocess entry.
-- [ ] `domain_adapter.py` checks image side bounds before pixel decode.
-- [ ] `domain_adapter.py` `_normalize_proprio` warn-logs at `>1` excess and raises at `>10`.
-- [ ] `inference_server.py` serves `GET /admin/schema` with `prompt.max_tokens=null` in both modes (Phase 0 deferral).
-- [ ] All 5 new test files green; 3 extended tests still green; existing 8 acceptance tests still green.
-- [ ] MimicRec smoke (`smoke_inference_real_data.py`) still green with no client-side change.
-- [ ] No new `configs/deploy/*.yaml` fields.
-- [ ] No new `predictors/*.py` constructor changes.
-- [ ] `tools/export_checkpoint.py` is NOT introduced as part of this change (tokenizer load remains Phase 1).
+- [x] `schemas.py` keeps `extra="ignore"`; adds `instruction` byte validator + typo `model_validator`.
+- [x] `domain_adapter.py` rejects NaN/inf proprio at preprocess entry.
+- [x] `domain_adapter.py` checks image side bounds before pixel decode.
+- [x] `domain_adapter.py` `_normalize_proprio` warn-logs at `>1` excess and raises at `>10`.
+- [x] `inference_server.py` serves `GET /admin/schema` with `prompt.max_tokens=null` in both modes (Phase 0 deferral).
+- [x] All 5 new test files green; 3 extended tests still green; existing 8 acceptance tests still green. (106/106 in extended Phase 0 acceptance gate.)
+- [x] MimicRec smoke (`smoke_inference_real_data.py`) still green with no client-side change. (`IK failures: 0/8`.)
+- [x] No new `configs/deploy/*.yaml` fields.
+- [x] No new `predictors/*.py` constructor changes.
+- [x] `tools/export_checkpoint.py` is NOT introduced as part of this change (tokenizer load remains Phase 1).
