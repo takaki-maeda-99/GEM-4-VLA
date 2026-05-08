@@ -99,6 +99,11 @@ PYTHONPATH= uv run pytest \
   tests/test_runtime_load.py \
   tests/test_inference_server_minimal.py \
   tests/test_serve_smoke.py \
+  tests/test_validation_image_sanity.py \
+  tests/test_validation_prompt.py \
+  tests/test_validation_proprio.py \
+  tests/test_validation_typo.py \
+  tests/test_admin_schema.py \
   -q
 ```
 

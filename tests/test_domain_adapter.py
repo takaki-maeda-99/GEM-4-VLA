@@ -430,3 +430,30 @@ class TestStartupAssertionsXVLAFull:
                 cfg, meta_cfg=self._ok_meta_cfg(),
                 norm_stats=self._ok_norm_stats(), domain_id=0,
             )
+
+
+def test_preprocess_rejects_nan_proprio():
+    """F3a regression: NaN in raw proprio raises before normalization."""
+    cfg = load_deploy_config("configs/deploy/v36_libero_spatial.yaml")
+    adapter = DomainAdapter(cfg=cfg, norm_stats=None, domain_id=0)
+    proprio = [0.0] * cfg.proprio.source.total_dim
+    proprio[1] = float("nan")
+    req = PredictRequest(
+        image_primary=_make_jpeg_b64(),
+        proprio=proprio,
+        instruction="x",
+    )
+    with pytest.raises(ValueError, match="non-finite"):
+        adapter.preprocess(req)
+
+
+def test_decode_jpeg_b64_rejects_too_small_image():
+    """F1 regression: 32×32 image rejected by header sanity bound."""
+    import base64
+    import io
+    from PIL import Image
+    img = Image.new("RGB", (32, 32))
+    buf = io.BytesIO(); img.save(buf, format="JPEG", quality=70)
+    b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+    with pytest.raises(ValueError, match="out of sanity bound"):
+        DomainAdapter._decode_jpeg_b64(b64)
