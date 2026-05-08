@@ -14,9 +14,10 @@ Key differences from ``LeRobotLiberoDataset``:
   - Shuffle is handled inside RLDS (``shuffle_buffer_size`` arg). No need
     to shuffle ourselves.
 
-Requires the vla-gemma-4 venv (tensorflow + dlimp + prismatic.vla.datasets
-on PYTHONPATH). Use ``/misc/dl00/takaki/vla-gemma-4/.venv-gemma4/bin/python``
-when launching trainer with this dataset.
+Requires a venv with tensorflow + dlimp installed; we share
+``/misc/dl00/takaki/vla-gemma-4/.venv-gemma4/bin/python`` for that.
+prismatic is vendored under ``src/prismatic/`` so PYTHONPATH=src/ is
+sufficient.
 """
 from __future__ import annotations
 
@@ -127,7 +128,7 @@ class RLDSLiberoDataset(IterableDataset):
         return payload[inner_keys[0]]
 
     def _build_rlds(self):
-        # Local import: requires vla-gemma-4 venv (tensorflow + prismatic.vla).
+        # Local import: requires a TF venv. prismatic is vendored at src/prismatic.
         from prismatic.vla.datasets.rlds.dataset import make_interleaved_dataset
         from prismatic.vla.datasets.rlds.oxe import get_oxe_dataset_kwargs_and_weights
         from prismatic.vla.datasets.rlds.utils.data_utils import NormalizationType

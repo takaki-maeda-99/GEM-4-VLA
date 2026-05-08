@@ -12,8 +12,9 @@ produce a batch matching the internal schema the model expects:
     True (default contract), domain_id in {set of source ids}.
 
 Skipped when:
-  - tensorflow / prismatic.vla.datasets are not importable (e.g. CI without
-    the vla-gemma-4 venv).
+  - tensorflow / dlimp are not importable (e.g. CI without a TF venv;
+    prismatic itself is vendored under src/prismatic so its absence does
+    not trigger skip).
   - The fractal20220817_data dataset is not present at the expected disk
     path. CI/dev machines without OXE data simply skip.
 """
@@ -44,7 +45,7 @@ def _have_prismatic() -> bool:
 )
 @pytest.mark.skipif(
     not _have_prismatic(),
-    reason="prismatic / TF not importable (run under vla-gemma-4 venv)",
+    reason="prismatic / TF not importable (run under a TF + dlimp venv)",
 )
 def test_rlds_oxe_dataset_first_batch_contract() -> None:
     from vla_project.data.datasets.rlds_oxe_dataset import RLDSOxeDataset
@@ -117,7 +118,7 @@ def test_rlds_oxe_dataset_first_batch_contract() -> None:
 )
 @pytest.mark.skipif(
     not _have_prismatic(),
-    reason="prismatic / TF not importable (run under vla-gemma-4 venv)",
+    reason="prismatic / TF not importable (run under a TF + dlimp venv)",
 )
 def test_rlds_oxe_with_wrist_dataset_marks_true() -> None:
     """Sanity-check the inverse: a dataset WITH wrist (taco_play) emits

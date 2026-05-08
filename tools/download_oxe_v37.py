@@ -12,7 +12,8 @@ Adapted from /misc/dl00/takaki/vla-gemma-4/scripts/stage3/download_data.py.
 Direct GCS copy (anonymous read of gs://gresearch/robotics/<name>/<version>/),
 parallel ThreadPoolExecutor, resume by skipping existing files, status JSON.
 
-Run with the vla-gemma-4 venv (TF 2.15 + tfds):
+Run with any TF 2.15 + tfds venv (we share
+``/misc/dl00/takaki/vla-gemma-4/.venv-gemma4`` for that):
   /misc/dl00/takaki/vla-gemma-4/.venv-gemma4/bin/python \
     /misc/dl00/takaki/X-VLA-Adapter/tools/download_oxe_v37.py 2>&1 \
     | tee /misc/dl00/takaki/X-VLA-Adapter/outputs/v37_dl/download.log
