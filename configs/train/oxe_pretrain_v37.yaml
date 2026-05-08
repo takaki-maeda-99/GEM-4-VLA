@@ -1,0 +1,139 @@
+# V37: OXE single-arm 6DOF+Gripper multi-domain pretrain.
+#
+# Base: v36 (wrist_in_llm + π₀ "fixed slot + mask"). Differences from v36:
+#   - num_domains: 1 → 11 (per-dataset DA rows)
+#   - wrist_view_dropout_p: 0.3 → 0.2 (effective wrist-absent ≈ 49.1%
+#     given natural 36.4% absent rate in the 11-source mixture; see
+#     codex round 3 audit)
+#   - data.type: libero_rlds → oxe_rlds_multidomain
+#   - data.shuffle_buffer_size: 256000 → 65536 (per-child; total 11×64k =
+#     720k frames buffered to keep RLDS pipeline within RAM budget)
+#   - max_steps: 40000 → 100000 (OXE pretrain budget at 6× A100 DDP)
+#
+# Mixture: 11 OXE EEF_POS datasets (delta XYZ + RPY + gripper = 7-dim).
+# Uniform weight=1.0 per Q7. Per-dataset domain_id 0..10 per Q2.
+# Wrist presence: 7 datasets have wrist (taco/jaco/viola/ur5/hydra/sailor/sirius),
+# 4 do not (fractal/kuka/nyu_franka/bridge_orig). Wrist mask is derived
+# per-sample from RLDS pad_mask_dict in rlds_oxe_dataset.py.
+#
+# Stats: per-domain BOUNDS_Q99 (RLDS computes/caches each dataset's stats
+# next to its data files). No shared_stats_path — keep per-dataset Q99 as
+# the canonical norm so the per-domain DA action_decoder absorbs domain
+# distribution differences without forcing a combined-Q99 collapse.
+#
+# Hardware: 6× A100 40GB DDP, bs=8/GPU (effective 48). Launch with
+#   accelerate launch --multi_gpu --num_processes 6 \
+#     scripts/train.py configs/train/oxe_pretrain_v37.yaml
+seed: 0
+model:
+  num_domains: 9                           # v37: 9 OXE datasets (kuka dropped 2026-05-06 quota; bridge dropped 2026-05-07 persistent corrupt-tfrecord/schema issues)
+  compat_profile: x_vla_adapter
+  hidden_dim: 1536
+  num_blocks: 24
+  use_grad_checkpoint: true
+  use_wrist_bridge: false                  # v36 inherit
+  wrist_in_llm: true                       # v36 inherit
+  wrist_view_dropout_p: 0.2                # v37: codex round 3 (0.364 + 0.636*0.2 = 0.491 effective absent)
+  ungated_streams: false
+  use_soft_prompt: true
+  num_soft_prompt_tokens: 32
+  soft_prompt_in_llm: true
+  prompt_position: after_vision
+  include_proprio_placeholder: false
+  prompt_max_len: 20
+  use_baseline_projectors: false
+  proj_arch: da_2layer
+  proj_hidden_dim: 1536
+  vision_placeholder_mode: unused_range
+  freeze_llm_and_aq: false
+  freeze_action_queries: false
+  wrap_llm_in_no_grad: false
+  lora:
+    r: 64
+    alpha: 128
+    target_modules: [q_proj, v_proj]
+    dropout: 0.0
+vision:
+  type: timm
+  model_name: google/siglip-so400m-patch14-224
+language:
+  model_name: google/gemma-4-E2B
+data:
+  type: oxe_rlds_multidomain
+  data_dir: /misc/dl00/takaki/vla-gemma-4/data/stage3_openx
+  action_chunk_len: 8
+  shuffle_buffer_size: 65536               # v37: per-child (11 × 64k = 720k frames)
+  train: true
+  seed: 42
+  # No shared_stats_path: per-dataset RLDS Q99 stats (cached next to data).
+  sources:
+    - dataset_name: fractal20220817_data
+      domain_id: 0
+      weight: 1.0
+    - dataset_name: taco_play
+      domain_id: 1
+      weight: 1.0
+    # NOTE: kuka dropped 2026-05-06 due to disk-quota constraints (would have been
+    # 750GB; user accepted 10-domain mixture vs further outputs cleanup). domain_id
+    # numbering compacted accordingly (was 2; remaining shift -1).
+    - dataset_name: jaco_play
+      domain_id: 2
+      weight: 1.0
+    - dataset_name: viola
+      domain_id: 3
+      weight: 1.0
+    - dataset_name: berkeley_autolab_ur5
+      domain_id: 4
+      weight: 1.0
+    - dataset_name: stanford_hydra_dataset_converted_externally_to_rlds
+      domain_id: 5
+      weight: 1.0
+    - dataset_name: nyu_franka_play_dataset_converted_externally_to_rlds
+      domain_id: 6
+      weight: 1.0
+    - dataset_name: austin_sailor_dataset_converted_externally_to_rlds
+      domain_id: 7
+      weight: 1.0
+    - dataset_name: austin_sirius_dataset_converted_externally_to_rlds
+      domain_id: 8
+      weight: 1.0
+    # NOTE: bridge dropped 2026-05-07 due to persistent corrupted tfrecord
+    # records on the GCS-mirrored bridge dataset (4 distinct issues: schema
+    # mismatch, autograph dict iteration, repeated DataLossError after
+    # multiple re-DL attempts). 9-domain mixture preserves Franka×6 / UR5 /
+    # Jaco / RT-1 embodiments. WidowX (only Bridge-derived domain) is lost.
+train:
+  # v37: per-GPU bs=8, 8-bit AdamW (bitsandbytes) to fit DA-2-MLP × num_domains=9
+  # optimizer state in A100-40GB. 8-bit Adam saves ~600 MB / GPU vs fp32 AdamW
+  # by quantizing momentum buffers; numerical behavior is well-characterized in
+  # the LoRA/QLoRA literature and matches AdamW within a few %. Effective batch
+  # = 8 × 6 GPU = 48 (= target, no grad_accum).
+  batch_size: 8
+  optimizer_kind: adamw_8bit
+  lr: 2.0e-4
+  weight_decay: 0.01
+  max_steps: 100000                        # v37: OXE pretrain budget
+  freeze_steps: 10000                      # v37: 10% of max_steps (v36 was 4k/40k = 10%)
+  warmup_steps: 5000                       # v37: 5% of max_steps (v36 was 2k/40k = 5%)
+  freeze_group_names: [gemma_lora]
+  schedule_group_names: [gemma_lora, action_queries, scene_projection, soft_prompts]
+  min_lr_ratio: 1.0
+  grad_clip_norm: 1.0
+  lr_coefs:
+    gemma_lora:        0.1
+    siglip:            0.0
+    wrist_siglip:      0.0
+    soft_prompts:      0.5
+    action_queries:    0.5
+    scene_projection:  0.5
+    head_projections:  1.0
+    action_head:       1.0
+  save_every: 10000                         # v37: 100k steps → 10 ckpts
+  save_dir: outputs/oxe_pretrain_v37/checkpoints
+  diagnostic_first_n_batches: 100           # v37 (B10): per-batch domain_id share / wrist_mask rate / action range
+  ddp_find_unused_parameters: false         # v37 C1 trial: FUP=False vs True ≈ 0.6% step_time delta. v37 has zero actual unused params (DDP runtime warning), so False is the cleaner default.
+wandb:
+  enabled: true
+  project: vla-project
+  name: oxe_pretrain_v37_11suites_per_domain_q99_wrist_drop02_lora_r64
+  tags: [oxe_pretrain, rlds, multidomain, da_2layer, soft_prompt_llm, wrist_in_llm, wrist_drop02, lora_r64, 11_domains]
