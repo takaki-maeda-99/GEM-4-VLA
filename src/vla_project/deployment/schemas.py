@@ -31,7 +31,12 @@ INSTRUCTION_MAX_BYTES: int = 10_000
 _MODELED_FIELDS: frozenset[str] = frozenset({
     "image_primary", "image_wrist",
     "proprio", "instruction",
-    "model_version", "_t_mono_ns",
+    "model_version",
+    # Both forms are accepted under populate_by_name=True: the wire alias
+    # "_t_mono_ns" (per MimicRec contract) and the Python attribute name
+    # "t_mono_ns". Both must be in the set so the typo guard does not
+    # reject the in-Python construction path.
+    "_t_mono_ns", "t_mono_ns",
 })
 
 

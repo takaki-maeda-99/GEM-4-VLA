@@ -124,3 +124,49 @@ def test_unrelated_unknown_field_silently_ignored():
     raw["unrelated_metadata_field"] = 42
     req = PredictRequest.model_validate(raw)
     assert req.image_primary
+
+
+# ----- Regression: populate_by_name=True + typo guard contract -----
+
+def test_underscored_t_mono_ns_alias_accepted_via_wire():
+    """Regression: `_t_mono_ns` (the wire alias) is accepted as-is."""
+    raw = _base_kwargs()
+    raw["_t_mono_ns"] = {"state": 1}
+    req = PredictRequest.model_validate(raw)
+    assert req.t_mono_ns == {"state": 1}
+
+
+def test_t_mono_ns_python_name_accepted_via_populate_by_name():
+    """Regression: `populate_by_name=True` + the typo guard must agree —
+    the Python attribute name `t_mono_ns` (no underscore) must be accepted
+    too. This was Critical reviewer feedback after the typo guard initially
+    rejected this case as a near-miss of `_t_mono_ns`."""
+    raw = _base_kwargs()
+    raw["t_mono_ns"] = {"state": 1}
+    req = PredictRequest.model_validate(raw)
+    assert req.t_mono_ns == {"state": 1}
+
+
+# ----- Rule 1: substitution edit type -----
+
+def test_typo_substitution_caught_as_near_miss():
+    """Substitution: instrxction (x for u) → distance 1 from instruction."""
+    raw = _base_kwargs()
+    raw["instrxction"] = "test"
+    raw.pop("instruction")  # avoid duplicate
+    with pytest.raises(ValidationError) as exc:
+        PredictRequest.model_validate(raw)
+    msg = str(exc.value)
+    assert "instrxction" in msg
+    assert "instruction" in msg
+
+
+# ----- Forward-compat: _session_token -----
+
+def test_underscore_session_token_silently_ignored():
+    """Forward-compat: `_session_token` is one of the three explicitly named
+    MimicRec observability fields the spec promises to ignore."""
+    raw = _base_kwargs()
+    raw["_session_token"] = "tok-abc"
+    req = PredictRequest.model_validate(raw)
+    assert req.image_primary
