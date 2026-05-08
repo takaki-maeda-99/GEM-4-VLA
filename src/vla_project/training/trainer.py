@@ -44,6 +44,12 @@ class TrainerConfig:
     # L1/MSE loss subtly lossy. Add ``loss_weight``, ``return_to_go``, etc.
     # as appropriate for new tasks.
     keep_dtype_keys: Tuple[str, ...] = ("target_action",)
+    # Diagnostic logging for the first N batches (B10): per-batch domain_id
+    # histogram, wrist_mask presence rate, action / proprio min-max-mean. Helps
+    # catch DA-row off-by-one, wrist_mask polarity bugs, normalization breakage
+    # before they pollute many gradient steps. 0 disables (default — keep
+    # legacy v33-v36 behavior). v37 OXE multi-domain sets 100.
+    diagnostic_first_n_batches: int = 0
 
 
 def _cast_tensor_to_device(t: torch.Tensor, device, model_dtype, keep_orig: bool) -> torch.Tensor:
@@ -184,8 +190,51 @@ class Trainer:
         accum_i = 0
         accum_loss_sum = 0.0
         self.optimizer.zero_grad()
+        # Per-domain sample counts accumulated over the first
+        # diagnostic_first_n_batches batches (B10). Gives a quick view of
+        # whether the WeightedMultiDataset draw distribution matches expected
+        # uniform / weighted ratios.
+        diagnostic_n = int(self.cfg.diagnostic_first_n_batches)
+        domain_counts: Dict[int, int] = {}
+        diag_batches_seen = 0
+
         while step < self.cfg.max_steps:
             for batch in dataloader:
+                # ----- B10 first-N-batches diagnostic --------------------
+                if diag_batches_seen < diagnostic_n and isinstance(batch, dict):
+                    diag_batches_seen += 1
+                    diag_payload: Dict[str, float] = {}
+                    if "domain_id" in batch and torch.is_tensor(batch["domain_id"]):
+                        ids = batch["domain_id"].detach().cpu().tolist()
+                        for i in ids:
+                            domain_counts[int(i)] = domain_counts.get(int(i), 0) + 1
+                    if "wrist_mask" in batch and torch.is_tensor(batch["wrist_mask"]):
+                        wm = batch["wrist_mask"].detach()
+                        if wm.numel() > 0:
+                            diag_payload["diag/wrist_present_rate"] = float(wm.float().mean().item())
+                    if "target_action" in batch and torch.is_tensor(batch["target_action"]):
+                        ta = batch["target_action"].detach().float()
+                        diag_payload["diag/action_min"] = float(ta.min().item())
+                        diag_payload["diag/action_max"] = float(ta.max().item())
+                        diag_payload["diag/action_abs_mean"] = float(ta.abs().mean().item())
+                    if "proprio" in batch and torch.is_tensor(batch["proprio"]):
+                        pp = batch["proprio"].detach().float()
+                        diag_payload["diag/proprio_min"] = float(pp.min().item())
+                        diag_payload["diag/proprio_max"] = float(pp.max().item())
+                    if hasattr(self.accelerator, "log") and diag_payload:
+                        # step here is pre-increment; log under the upcoming step
+                        self.accelerator.log(diag_payload, step=step + 1)
+                    if diag_batches_seen == diagnostic_n:
+                        # End-of-window summary: per-domain count distribution
+                        # (single emit, attached to the upcoming step).
+                        if domain_counts and hasattr(self.accelerator, "log"):
+                            total = sum(domain_counts.values())
+                            domain_summary = {
+                                f"diag/domain_share/{did}": cnt / total
+                                for did, cnt in sorted(domain_counts.items())
+                            }
+                            self.accelerator.log(domain_summary, step=step + 1)
+                # --------------------------------------------------------
                 batch = _cast_batch(batch, device, model_dtype, self.cfg.keep_dtype_keys)
 
                 # Apply LR schedule for the upcoming optimizer step. `step` is
