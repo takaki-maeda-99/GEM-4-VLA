@@ -1,4 +1,8 @@
 """Thin training entrypoint. Heavy lifting lives in vla_project.training.trainer."""
+import json
+from pathlib import Path
+from typing import Any, Dict
+
 import torch
 from omegaconf import DictConfig, OmegaConf
 from torch.utils.data import DataLoader
@@ -107,6 +111,77 @@ def _build_dataloader(cfg: DictConfig, prompt_max_len: int, language_model_name:
             ds, batch_size=cfg.train.batch_size,
             collate_fn=RLDSLiberoDataset.collate_fn,
         )
+    if data_type == "oxe_rlds_multidomain":
+        # v37 OXE single-arm 6DOF+Gripper multi-domain pretrain. Same shape as
+        # libero_rlds_multidomain but uses RLDSOxeDataset (generic OXE wrapper
+        # with wrist_mask derived from RLDS pad_mask_dict and action/proprio
+        # contract checks). Per-dataset domain_id, RLDS per-suite Q99 stats by
+        # default. ``shared_stats_path`` is intentionally NOT supported here:
+        # OXE per-dataset action distributions differ enough that combining
+        # would collapse useful per-domain calibration; per-domain DA-2-MLP
+        # rows handle the distribution gap instead.
+        tok = GemmaPromptTokenizer(model_name=language_model_name, max_len=prompt_max_len)
+        from vla_project.data.datasets.rlds_oxe_dataset import RLDSOxeDataset
+        if cfg.data.get("shared_stats_path", None):
+            raise ValueError(
+                "shared_stats_path is not supported for oxe_rlds_multidomain; "
+                "OXE distributions are per-dataset (use per-domain DA rows)."
+            )
+        # Validate domain_id contract before building children: must be unique,
+        # non-negative, and 0 <= id < cfg.model.num_domains. Catches config drift
+        # (adding a source without bumping num_domains) before the trainer runs
+        # an out-of-range nn.Embedding lookup mid-batch.
+        sources = list(cfg.data.sources)
+        if len(sources) == 0:
+            raise ValueError("oxe_rlds_multidomain: cfg.data.sources is empty")
+        names = [str(src.dataset_name) for src in sources]
+        if len(set(names)) != len(names):
+            raise ValueError(f"oxe_rlds_multidomain: duplicate dataset_name: {names!r}")
+        ids = [int(src.domain_id) for src in sources]
+        if any(i < 0 for i in ids):
+            raise ValueError(f"oxe_rlds_multidomain: domain_id must be >= 0; got {ids!r}")
+        if len(set(ids)) != len(ids):
+            raise ValueError(f"oxe_rlds_multidomain: duplicate domain_id in sources: {ids!r}")
+        nd = int(cfg.model.num_domains)
+        if max(ids) >= nd:
+            raise ValueError(
+                f"oxe_rlds_multidomain: max(domain_id)={max(ids)} >= "
+                f"cfg.model.num_domains={nd}; bump num_domains or fix sources"
+            )
+        if len(ids) != nd:
+            raise ValueError(
+                f"oxe_rlds_multidomain: len(sources)={len(ids)} != "
+                f"cfg.model.num_domains={nd}; per-dataset DA expects 1:1"
+            )
+        children: list = []
+        weights: list = []
+        for src in sources:
+            children.append(RLDSOxeDataset(
+                data_dir=cfg.data.data_dir,
+                dataset_name=str(src.dataset_name),
+                tokenizer=tok,
+                action_chunk_len=int(cfg.data.get("action_chunk_len", 8)),
+                shuffle_buffer_size=int(cfg.data.get("shuffle_buffer_size", 65536)),
+                train=bool(cfg.data.get("train", True)),
+                domain_id=int(src.domain_id),
+                seed=int(cfg.data.get("seed", 42)) + int(src.domain_id),
+                include_scene_dinov2=include_scene_dinov2,
+                include_wrist_dinov2=include_wrist_dinov2,
+            ))
+            weights.append(float(src.weight))
+        ds = WeightedMultiDataset(children, weights, seed=int(cfg.data.get("seed", 0)))
+        # cfg.train.num_workers: DataLoader worker count. For IterableDataset
+        # each worker spawns a subprocess running its own RLDS pipeline
+        # (memory ~RAM × num_workers per rank). num_workers=0 keeps everything
+        # in the main process; safe default. Bump to 1-2 only if GPU shows
+        # data-fetch stalls (util drops < 100% periodically).
+        nw = int(cfg.train.get("num_workers", 0))
+        return DataLoader(
+            ds, batch_size=cfg.train.batch_size,
+            collate_fn=RLDSOxeDataset.collate_fn,
+            num_workers=nw,
+            persistent_workers=(nw > 0),
+        )
     if data_type == "libero_lerobot_multidomain":
         tok = GemmaPromptTokenizer(model_name=language_model_name, max_len=prompt_max_len)
         children: list = []
@@ -139,13 +214,111 @@ def _build_dataloader(cfg: DictConfig, prompt_max_len: int, language_model_name:
 
 
 def _checkpoint_norm_stats(cfg: DictConfig):
-    """Return stats metadata to embed in checkpoints, when the config has it."""
+    """Return stats metadata to embed in checkpoints, when the config has it.
+
+    Two shapes:
+
+    - Single-domain (libero_rlds, libero_lerobot_real, libero_synthetic): wrap
+      one stats payload by ``unnorm_key`` from a single ``stats_path`` JSON.
+      Backwards-compatible with v33-v36 LIBERO ckpts.
+
+    - oxe_rlds_multidomain (v37): build a per-domain manifest by walking
+      ``cfg.data.sources`` and reading each dataset's
+      ``<data_dir>/<dataset_name>/dataset_statistics.json`` (friendly path,
+      written by tools/precompute_oxe_stats.py). The manifest contains
+      ``{by_domain: {<id>: {dataset_name, stats_path, stats_hash, action,
+      proprio, num_transitions}}}`` plus mixture/dropout/buffer config so the
+      checkpoint is self-describing for downstream eval/finetune. Maps to
+      B5 + B11 from the v37 plan.
+    """
     data = cfg.get("data", {})
+    if data.get("type") == "oxe_rlds_multidomain":
+        return _build_oxe_norm_manifest(cfg)
     stats_path = data.get("stats_path")
     unnorm_key = data.get("unnorm_key")
     if not stats_path or not unnorm_key:
         return None
     return load_norm_stats_payload(stats_path, unnorm_key)
+
+
+def _build_oxe_norm_manifest(cfg: DictConfig) -> Dict[str, Any]:
+    """Per-domain norm-stats manifest for v37 OXE multi-domain pretrain.
+
+    Reads each source's friendly-named stats file at
+    ``<data_dir>/<dataset_name>/dataset_statistics.json``. The friendly path is
+    populated by ``tools/precompute_oxe_stats.py`` (single pass over each
+    dataset; same canonicalized stream RLDS uses at training time so q01/q99
+    match what the loader normalizes against).
+
+    Returns dict with keys:
+      schema_version: "v37_oxe_per_domain"
+      by_domain: { "<id>": { dataset_name, stats_path, stats_hash, action,
+                              proprio, num_transitions } }
+      mixture: { weights: {<id>: w}, dataset_names: {<id>: name} }
+      config: { wrist_view_dropout_p, shuffle_buffer_size, action_chunk_len,
+                num_domains }
+
+    Raises FileNotFoundError if any source's stats file is missing — caller
+    must run tools/precompute_oxe_stats.py first.
+    """
+    import hashlib
+
+    data_dir = Path(str(cfg.data.data_dir))
+    sources = list(cfg.data.sources)
+    by_domain: Dict[str, Dict[str, Any]] = {}
+    weights_map: Dict[str, float] = {}
+    names_map: Dict[str, str] = {}
+    for src in sources:
+        name = str(src.dataset_name)
+        domain_id = int(src.domain_id)
+        # Friendly path matches the existing stage3_openx convention
+        # (fractal20220817_data, taco_play already populated this way).
+        stats_path = data_dir / name / "dataset_statistics.json"
+        if not stats_path.is_file():
+            raise FileNotFoundError(
+                f"oxe_rlds_multidomain: per-domain stats missing for {name!r} at "
+                f"{stats_path}. Run tools/precompute_oxe_stats.py to populate, "
+                f"or copy a precomputed dataset_statistics.json into place."
+            )
+        payload = json.loads(stats_path.read_text())
+        # Friendly format wraps under dataset_name. RLDS-cached unwrapped form
+        # has top-level action/proprio. Accept either.
+        if name in payload:
+            block = payload[name]
+        elif "action" in payload:
+            block = payload
+        else:
+            raise KeyError(
+                f"{stats_path} is not a recognized stats payload "
+                f"(no top-level {name!r} wrapper or action key); "
+                f"keys: {list(payload.keys())}"
+            )
+        sha = hashlib.sha256(stats_path.read_bytes()).hexdigest()[:16]
+        by_domain[str(domain_id)] = {
+            "dataset_name": name,
+            "stats_path": str(stats_path),
+            "stats_hash": sha,
+            "action": block.get("action"),
+            "proprio": block.get("proprio"),
+            "num_transitions": block.get("num_transitions"),
+        }
+        weights_map[str(domain_id)] = float(src.weight)
+        names_map[str(domain_id)] = name
+
+    return {
+        "schema_version": "v37_oxe_per_domain",
+        "by_domain": by_domain,
+        "mixture": {
+            "weights": weights_map,
+            "dataset_names": names_map,
+        },
+        "config": {
+            "wrist_view_dropout_p": float(cfg.model.get("wrist_view_dropout_p", 0.0)),
+            "shuffle_buffer_size": int(cfg.data.get("shuffle_buffer_size", 65536)),
+            "action_chunk_len": int(cfg.data.get("action_chunk_len", 8)),
+            "num_domains": int(cfg.model.num_domains),
+        },
+    }
 
 
 def main(cfg_path: str) -> None:
@@ -159,7 +332,9 @@ def main(cfg_path: str) -> None:
     from accelerate import Accelerator
     from vla_project.training.accelerate_utils import default_ddp_kwargs_handlers
 
-    ddp_handlers = default_ddp_kwargs_handlers()
+    ddp_handlers = default_ddp_kwargs_handlers(
+        find_unused_parameters=bool(cfg.train.get("ddp_find_unused_parameters", True)),
+    )
     # wandb is ENABLED by default. Set `wandb.enabled: false` in the config,
     # or export `WANDB_MODE=disabled` (no run, no files) / `WANDB_MODE=offline`
     # (local cache only, no server) to opt out for one-off smoke runs.
@@ -196,6 +371,25 @@ def main(cfg_path: str) -> None:
         lora=lora_cfg,
     )
     policy = VLAPolicy(policy_cfg, vision, gemma).to(device).to(dtype)
+
+    # ``train.resume_ckpt``: optional path to a prior v37-style checkpoint
+    # (model.pt + meta.json). Loaded after model construction, before
+    # torch.compile and optimizer build, so subsequent steps see the resumed
+    # weights. ``train.resume_da_row_init`` controls how new per-domain rows
+    # are initialized when the FT model has a larger num_domains than the
+    # source ckpt (e.g. 9 → 10 to add LIBERO at row 9). See
+    # vla_project.training.checkpoint.load_pretrain_with_da_row_expansion.
+    resume_ckpt = cfg.train.get("resume_ckpt", None)
+    if resume_ckpt:
+        from vla_project.training.checkpoint import load_pretrain_with_da_row_expansion
+        init_strategy = str(cfg.train.get("resume_da_row_init", "copy_row_1"))
+        print(f"[train] resuming weights from {resume_ckpt} (strategy={init_strategy!r})")
+        load_pretrain_with_da_row_expansion(
+            resume_ckpt, policy,
+            new_num_domains=int(cfg.model.num_domains),
+            init_strategy=init_strategy,
+        )
+
     compile_mode = str(cfg.train.get("compile_mode", "off"))
     if compile_mode != "off":
         # `mode in {"default", "reduce-overhead", "max-autotune"}` per torch
@@ -225,6 +419,7 @@ def main(cfg_path: str) -> None:
         soft_lr_coef=cfg.train.get("soft_lr_coef"),
         weight_decay=cfg.train.weight_decay,
         lr_coefs=lr_coefs,
+        optimizer_kind=str(cfg.train.get("optimizer_kind", "adamw")),
     )
     # ``schedule_group_names`` / ``freeze_group_names`` default to
     # TrainerConfig's class defaults when not specified, but allow yaml
@@ -246,6 +441,7 @@ def main(cfg_path: str) -> None:
         grad_clip_norm=float(cfg.train.get("grad_clip_norm", 1.0)),
         schedule_group_names=schedule_group_names,
         freeze_group_names=freeze_group_names,
+        diagnostic_first_n_batches=int(cfg.train.get("diagnostic_first_n_batches", 0)),
     )
     trainer = Trainer(policy, optim, trainer_cfg, accelerator=accelerator)
     losses = trainer.fit(
