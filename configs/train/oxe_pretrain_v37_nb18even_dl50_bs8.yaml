@@ -25,8 +25,17 @@
 # Uses the self-sufficient local .venv (922e9cb dropped the vla-gemma-4/
 # .venv-gemma4 borrow); vla_project is installed editable so no PYTHONPATH
 # is needed.
+#
+# MALLOC_ARENA_MAX=2 + MALLOC_TRIM_THRESHOLD_=0: glibc allocator constraints
+# to mitigate the host-RAM monotonic decline observed in the bs=16 first
+# attempt and the bs=8 first retry. with_ram_budget(1) only caps tf.data
+# autotune (prefetch); the residual leak is most likely TF/dlimp native
+# buffer + glibc fragmentation from JPEG decode + parallel_calls=16 across
+# 9 RLDS pipelines on rank 0 only (Accelerate dispatch_batches=True). These
+# env vars are the cheapest A/B test for that hypothesis.
 #   cd /misc/dl00/takaki/X-VLA-Adapter
 #   mkdir -p outputs/oxe_pretrain_v37_nb18even_dl50_bs8
+#   MALLOC_ARENA_MAX=2 MALLOC_TRIM_THRESHOLD_=0 \
 #   CUDA_VISIBLE_DEVICES=0,1,2,3 \
 #   nohup .venv/bin/accelerate launch \
 #     --config_file configs/accelerate/dl50_4gpu.yaml \
@@ -111,7 +120,12 @@ train:
   freeze_steps: 5000                       # ↓ from 10000 (5%)
   warmup_steps: 2500                       # ↓ from 5000 (2.5%)
   freeze_group_names: [gemma_lora]
-  schedule_group_names: [gemma_lora, action_queries, scene_projection, soft_prompts]
+  # Include head_projections + action_head so they get warmup. Without it
+  # they trained at constant peak LR=2e-4 from step 0 (lr_coef=1.0 ×
+  # base lr); the v37 nb18even bs=8 first attempt went NaN at ~step 1k —
+  # 18-block MLPResNet action head with no pre-attention norm cannot
+  # absorb that LR cold-start, especially at bs=8 grad noise.
+  schedule_group_names: [gemma_lora, action_queries, scene_projection, soft_prompts, head_projections, action_head]
   min_lr_ratio: 1.0
   grad_clip_norm: 1.0
   ddp_find_unused_parameters: false

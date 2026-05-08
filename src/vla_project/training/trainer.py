@@ -5,6 +5,7 @@ Single-GPU `python scripts/train.py ...` and multi-GPU `accelerate launch
 constructor reads env vars set by `accelerate launch`; in single-process
 mode it is a near-no-op.
 """
+import math
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -181,6 +182,7 @@ class Trainer:
             from vla_project.training.schedulers import linear_warmup_cosine
 
         losses: List[float] = []
+        nan_skip_count = 0
         step = 0
         last_t = time.perf_counter()
         # Exponential moving average of step time for ETA (smooths out the
@@ -265,6 +267,25 @@ class Trainer:
                         g["lr"] = init * mul
 
                 _, loss = self.model(batch)
+                # NaN guard: a non-finite forward loss propagates through
+                # backward → clip_grad_norm_ (norm of NaN is NaN) →
+                # optimizer.step (param − lr × NaN = NaN) and poisons every
+                # trainable param. No recovery without rewinding to a ckpt,
+                # so discard the whole accumulation window. v37 nb18even bs=8
+                # hit this at ~step 1k.
+                if not torch.isfinite(loss).item():
+                    nan_skip_count += 1
+                    self.optimizer.zero_grad()
+                    accum_i = 0
+                    accum_loss_sum = 0.0
+                    if self.accelerator.is_main_process:
+                        print(
+                            f"[WARN] step {step}: non-finite forward loss "
+                            f"({float(loss.detach()):.6g}); skipping accumulation "
+                            f"(total skipped: {nan_skip_count})",
+                            flush=True,
+                        )
+                    continue
                 # Keep optimizer-step gradients equivalent to a large batch by
                 # averaging microbatch losses before backward. Reporting below
                 # logs the mean *raw* loss over the accumulation window.
@@ -273,9 +294,26 @@ class Trainer:
                 accum_i += 1
                 if accum_i < accum_steps:
                     continue
-                self.accelerator.clip_grad_norm_(
+                # Capture pre-clip total grad norm for diagnostics. Even with
+                # finite forward loss, bf16 backward can still overflow, so
+                # also guard the optimizer step against non-finite norm.
+                grad_norm = self.accelerator.clip_grad_norm_(
                     self.model.parameters(), self.cfg.grad_clip_norm
                 )
+                grad_norm_val = float(grad_norm) if grad_norm is not None else 0.0
+                if not math.isfinite(grad_norm_val):
+                    nan_skip_count += 1
+                    self.optimizer.zero_grad()
+                    accum_i = 0
+                    accum_loss_sum = 0.0
+                    if self.accelerator.is_main_process:
+                        print(
+                            f"[WARN] step {step}: non-finite grad_norm "
+                            f"({grad_norm_val}); skipping optimizer.step "
+                            f"(total skipped: {nan_skip_count})",
+                            flush=True,
+                        )
+                    continue
                 self.optimizer.step()
                 self.optimizer.zero_grad()
 
@@ -304,6 +342,8 @@ class Trainer:
                 if hasattr(self.accelerator, "log"):
                     payload = {
                         "train/loss":         loss_val,
+                        "train/grad_norm":    grad_norm_val,
+                        "train/nan_skip_count": float(nan_skip_count),
                         "train/step_time_ms": step_time_s * 1000.0,
                         "train/progress_pct": progress_pct,
                         "train/eta_s":        eta_s,
