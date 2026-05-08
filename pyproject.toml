@@ -2,11 +2,11 @@
 name = "vla_project"
 version = "0.0.1"
 description = "X-VLA-Adapter: Gemma4 + SigLIP + per-domain VLA-Adapter head"
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.12"  # tensorflow==2.15.0 (via dlimp) ships wheels for Python 3.9-3.11 only
 dependencies = [
     "torch>=2.4",
     "torchvision>=0.19",
-    "transformers>=5.0",   # Gemma4 model_type registered in 5.x; 4.x only knows gemma3n
+    "transformers>=5.5",   # Gemma4 model_type requires 5.5+ (5.0-5.4 only ships gemma3n)
     "accelerate>=1.0",
     "omegaconf>=2.3",
     "einops>=0.8",
@@ -26,8 +26,11 @@ dependencies = [
     "deepspeed>=0.18.9",
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
-    "httpx>=0.27",       # for FastAPI TestClient
-    "pyyaml>=6.0",       # explicit (currently transitive)
+    "httpx>=0.27",         # for FastAPI TestClient
+    "pyyaml>=6.0",         # explicit (currently transitive)
+    "dlimp @ git+https://github.com/moojink/dlimp_openvla@040105d256bd28866cc6620621a3d5f7b6b91b46",  # OXE/RLDS pipeline; transitively pulls tensorflow==2.15.0 + tensorflow_datasets>=4.9.2
+    "tensorflow-graphics>=2021.12",  # imported by prismatic/vla/datasets/rlds/oxe/utils/droid_utils.py (zero_action_filter)
+    "bitsandbytes>=0.41",  # NF4 backbone quantization + AdamW8bit (optimizer_kind="adamw_8bit")
 ]
 
 [project.optional-dependencies]
@@ -45,6 +48,13 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/vla_project"]
 
+# Permit `dlimp @ git+https://...` direct reference in dependencies.
+# dlimp is a fork of dlimp_openvla published only on GitHub, never on PyPI;
+# the moojink/dlimp_openvla pin commit is the canonical OpenVLA / OXE
+# RLDS data-pipeline implementation that all our baselines depend on.
+[tool.hatch.metadata]
+allow-direct-references = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q -ra"
@@ -61,7 +71,7 @@ torchvision = { index = "pytorch-cu128" }
 # transformers>=5.x for Gemma4 model_type support; lerobot's core API
 # (LeRobotDataset) does not depend on transformers internals.
 [tool.uv]
-override-dependencies = ["transformers>=5.0"]
+override-dependencies = ["transformers>=5.5"]
 
 [[tool.uv.index]]
 name = "pytorch-cu128"

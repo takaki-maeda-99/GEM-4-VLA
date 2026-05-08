@@ -16,7 +16,7 @@ For each dataset listed in configs/train/oxe_pretrain_v37.yaml's
 Run BEFORE the smoke / production trainer launch so the trainer doesn't
 spend hours computing stats per child on first batch:
 
-    /misc/dl00/takaki/vla-gemma-4/.venv-gemma4/bin/python \
+    /misc/dl00/takaki/X-VLA-Adapter/.venv/bin/python \
       /misc/dl00/takaki/X-VLA-Adapter/tools/precompute_oxe_stats.py \
       --config /misc/dl00/takaki/X-VLA-Adapter/configs/train/oxe_pretrain_v37.yaml \
       2>&1 | tee /misc/dl00/takaki/X-VLA-Adapter/outputs/v37_dl/precompute_stats.log
