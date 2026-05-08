@@ -13,12 +13,18 @@ import base64
 import io
 import json
 import logging
-import math
 
+import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
 
+from vla_project.deployment.domain_adapter import (
+    DomainAdapter,
+    PROPRIO_OOD_HARD_ABS,
+    PROPRIO_OOD_WARN_ABS,
+    load_deploy_config,
+)
 from vla_project.deployment.inference_server import build_app
 
 DEPLOY_YAML = "configs/deploy/v36_libero_spatial.yaml"
@@ -80,16 +86,6 @@ def test_proprio_inf_returns_422(client):
 # We exercise _normalize_proprio directly with synthetic norm_stats rather than
 # spinning up xvla_adapter mode (which requires a ckpt export dir). This keeps
 # the test independent of test fixtures for the broader xvla_adapter setup.
-
-import numpy as np
-
-from vla_project.deployment.domain_adapter import (
-    DomainAdapter,
-    PROPRIO_OOD_HARD_ABS,
-    PROPRIO_OOD_WARN_ABS,
-    DeployConfig,
-    load_deploy_config,
-)
 
 
 @pytest.fixture
