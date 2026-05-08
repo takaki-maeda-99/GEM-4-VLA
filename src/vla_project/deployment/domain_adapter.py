@@ -30,6 +30,13 @@ from vla_project.data import constants as C
 from vla_project.deployment.schemas import PredictRequest
 
 
+# F1 (per docs/superpowers/specs/2026-05-08-server-request-validation-design.md §F1):
+# Image side sanity bounds. Catches replay corruption (1×1) and abusive payloads
+# (100k×100k) before the JPEG decoder is asked to allocate pixel buffers.
+IMAGE_MIN_SIDE: int = 64
+IMAGE_MAX_SIDE: int = 4096
+
+
 class HardFailAssertion(Exception):
     """Raised at startup if deploy yaml ↔ ckpt metadata ↔ args are inconsistent."""
 
@@ -202,7 +209,19 @@ class DomainAdapter:
     @staticmethod
     def _decode_jpeg_b64(b64_str: str) -> np.ndarray:
         raw = base64.b64decode(b64_str)
-        img = Image.open(io.BytesIO(raw)).convert("RGB")
+        # F1: header-parse-first. Image.open() reads only the JPEG header
+        # (no pixel decode); .size returns (W, H) from the header. We bound
+        # the dimensions before convert("RGB") forces full pixel decode,
+        # so an attacker / corrupt payload can't allocate gigabytes via
+        # an oversized header.
+        img = Image.open(io.BytesIO(raw))
+        w, h = img.size
+        if min(w, h) < IMAGE_MIN_SIDE or max(w, h) > IMAGE_MAX_SIDE:
+            raise ValueError(
+                f"image side ({w}, {h}) out of sanity bound "
+                f"[{IMAGE_MIN_SIDE}, {IMAGE_MAX_SIDE}]"
+            )
+        img = img.convert("RGB")
         return np.asarray(img, dtype=np.uint8)
 
     def _apply_proprio_adapt(self, raw: np.ndarray) -> np.ndarray:
