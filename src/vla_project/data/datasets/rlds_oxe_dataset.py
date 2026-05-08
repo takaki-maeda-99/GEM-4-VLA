@@ -174,6 +174,12 @@ class RLDSOxeDataset(IterableDataset):
             num_parallel_calls=16,
             train=self.train,
         )
+        # Cap tf.data autotune RAM. The vendored ``make_interleaved_dataset``
+        # / ``make_single_dataset`` apply this; this manual build path bypasses
+        # both, so without it tf.data prefetch/shuffle buffers grow unbounded
+        # over hours and exhausted host RAM in the v37 OXE pretrain (4-rank ×
+        # 9 datasets crashed at ~step 7000 with rank-2 SIGSEGV after RAM hit 0).
+        dataset = dataset.with_ram_budget(1)
         return dataset
 
     @staticmethod

@@ -178,6 +178,11 @@ class RLDSLiberoDataset(IterableDataset):
                 num_parallel_calls=16,
                 train=self.train,
             )
+            # Cap tf.data autotune RAM. ``make_interleaved_dataset`` (the else
+            # branch below) applies this; this bypass path skips it, so without
+            # it tf.data buffers can grow unbounded. See rlds_oxe_dataset.py for
+            # the v37 pretrain crash this prevented.
+            dataset = dataset.with_ram_budget(1)
             return dataset
 
         rlds_config = dict(
