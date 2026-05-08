@@ -1,0 +1,30 @@
+# Accelerate launch preset for dl40: 6x A100 40GB DDP for v37 OXE pretrain.
+# Effective batch = 8 (per-GPU) x 6 (GPU) = 48.
+# CUDA_VISIBLE_DEVICES selects which 6 of dl40's 8 A100s to use; defaulting
+# to "0,1,2,3,4,5" leaves GPU 6/7 free for eval / other jobs.
+#
+# Why DDP, not FSDP / DeepSpeed:
+#   - FSDP failed in earlier experiments due to MHA wrapping incompatibilities
+#     (memory note in user_collaboration_style — "FSDP blocked by MHA").
+#   - DeepSpeed is untested in this codebase. Defer to a separate trial.
+#   - At v36 architecture (LoRA r=64, ~1.5B trainable on a 9GB Gemma) bs=8
+#     fits in 40GB per A100 with grad_checkpointing on, so DDP suffices.
+#
+# Launch:
+#   CUDA_VISIBLE_DEVICES=0,1,2,3,4,5 \
+#     accelerate launch --config_file configs/accelerate/dl40_6gpu.yaml \
+#       scripts/train.py configs/train/oxe_pretrain_v37_smoke.yaml
+compute_environment: LOCAL_MACHINE
+distributed_type: MULTI_GPU
+downcast_bf16: 'no'
+machine_rank: 0
+main_training_function: main
+mixed_precision: bf16
+num_machines: 1
+num_processes: 6
+rdzv_backend: static
+same_network: true
+tpu_env: []
+tpu_use_cluster: false
+tpu_use_sudo: false
+use_cpu: false

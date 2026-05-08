@@ -131,3 +131,114 @@ def load_checkpoint(
     if meta_path.is_file():
         return json.loads(meta_path.read_text())
     return {}
+
+
+def load_pretrain_with_da_row_expansion(
+    in_dir: Union[str, Path],
+    model: nn.Module,
+    *,
+    new_num_domains: int,
+    init_strategy: str = "copy_row_1",
+) -> Dict[str, Any]:
+    """Resume from a v37-style checkpoint when the FT model has a larger
+    ``num_domains`` than the saved one (e.g. 9 → 10 for adding LIBERO as
+    domain 9).
+
+    Per-domain weights live in ``nn.Embedding`` rows of:
+      - 8 DomainAwareLinear instances (scene/proprio/wrist/action_decoder
+        DA-2-MLPs, fc1+fc2 each = 8 linears, each has fc.weight + bias.weight)
+      - SoftPromptHub (embedding.weight)
+    Total: 17 row-expanded state_dict tensors. Other tensors are loaded
+    normally with strict shape checks.
+
+    init_strategy:
+      - "copy_row_1": fill new rows by replicating row 1 from the source
+        (taco_play / Franka EEF — closest to LIBERO Franka). Default.
+      - "copy_row_<n>": replicate from a specific source row.
+      - "random": leave new rows at the model's default init (don't touch).
+      - "zero": zero-fill new rows.
+
+    Returns the meta.json contents from the source ckpt (unchanged), so the
+    caller can decide whether to merge / inherit it into the FT checkpoint.
+    """
+    in_path = Path(in_dir)
+    if not in_path.is_dir():
+        raise FileNotFoundError(f"checkpoint dir not found: {in_path}")
+    model_pt = in_path / "model.pt"
+    if not model_pt.is_file():
+        raise FileNotFoundError(f"missing model.pt under {in_path}")
+    meta_path = in_path / "meta.json"
+
+    src_state = torch.load(model_pt, map_location="cpu", weights_only=True)
+    dst_state = model.state_dict()
+
+    # Resolve init_strategy → source row index (or special markers).
+    copy_idx: Optional[int] = None
+    if init_strategy.startswith("copy_row_"):
+        copy_idx = int(init_strategy.removeprefix("copy_row_"))
+    elif init_strategy not in ("random", "zero"):
+        raise ValueError(
+            f"unknown init_strategy={init_strategy!r}; expected "
+            f"'copy_row_<n>' / 'random' / 'zero'"
+        )
+
+    expanded_keys: list = []
+    skipped_keys: list = []
+    for key, src_tensor in src_state.items():
+        if key not in dst_state:
+            # New key in source not present in FT model — skip with warning.
+            skipped_keys.append(key)
+            continue
+        dst_tensor = dst_state[key]
+        if src_tensor.shape == dst_tensor.shape:
+            dst_state[key] = src_tensor
+            continue
+        # Shape mismatch: only allow row-axis (dim 0) expansion to new_num_domains.
+        if (
+            src_tensor.dim() >= 1
+            and dst_tensor.dim() == src_tensor.dim()
+            and src_tensor.shape[0] < new_num_domains
+            and dst_tensor.shape[0] == new_num_domains
+            and tuple(src_tensor.shape[1:]) == tuple(dst_tensor.shape[1:])
+        ):
+            old_n = src_tensor.shape[0]
+            # Build expanded: copy ckpt rows 0..old_n-1, fill rows old_n..new_num_domains-1.
+            expanded = dst_tensor.clone()  # default values from FT model's own init
+            expanded[:old_n] = src_tensor
+            if init_strategy == "random":
+                pass  # keep model's default init for new rows
+            elif init_strategy == "zero":
+                expanded[old_n:].zero_()
+            else:
+                # copy_row_<n>
+                if copy_idx is None or not (0 <= copy_idx < old_n):
+                    raise ValueError(
+                        f"init_strategy {init_strategy!r}: copy_idx={copy_idx} "
+                        f"out of range [0, {old_n})"
+                    )
+                src_row = src_tensor[copy_idx]
+                expanded[old_n:] = src_row.unsqueeze(0).expand(
+                    new_num_domains - old_n, *src_row.shape
+                ).clone()
+            dst_state[key] = expanded
+            expanded_keys.append((key, list(src_tensor.shape), list(dst_tensor.shape)))
+        else:
+            # Different shape mismatch — skip and let strict load surface error.
+            skipped_keys.append(key)
+
+    missing, unexpected = model.load_state_dict(dst_state, strict=True)
+    print(
+        f"[resume v37] expanded {len(expanded_keys)} per-domain rows "
+        f"(strategy={init_strategy!r}); skipped {len(skipped_keys)} keys"
+    )
+    if expanded_keys:
+        for k, src_shape, dst_shape in expanded_keys[:6]:
+            print(f"    {k}: {src_shape} → {dst_shape}")
+        if len(expanded_keys) > 6:
+            print(f"    ... and {len(expanded_keys) - 6} more")
+    if skipped_keys:
+        print(f"    skipped (shape unsupported): {skipped_keys[:4]}")
+
+    if meta_path.is_file():
+        return json.loads(meta_path.read_text())
+    return {}

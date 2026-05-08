@@ -45,6 +45,7 @@ def build_optimizer(
     weight_decay: float = 0.0,
     *,
     lr_coefs: Optional[Dict[str, float]] = None,
+    optimizer_kind: str = "adamw",
 ):
     """Build AdamW with per-group LR multipliers.
 
@@ -131,4 +132,23 @@ def build_optimizer(
     # Verified at vla-gemma-4 ``finetune_gemma4.py:1031`` (no betas arg →
     # defaults). Mismatch was a likely contributor to our train loss not
     # tracking the baseline.
-    return torch.optim.AdamW(groups, betas=(0.9, 0.999))
+    if optimizer_kind == "adamw":
+        return torch.optim.AdamW(groups, betas=(0.9, 0.999))
+    if optimizer_kind == "adamw_8bit":
+        # bitsandbytes 8-bit AdamW: stores momentum buffers in 8-bit (block-quantized
+        # to fp32 master) → ~75% optimizer-state memory reduction vs vanilla AdamW.
+        # Used in v37 OXE pretrain to fit per-GPU bs=8 across DA-2-MLP × num_domains=9
+        # weights on A100-40GB. Requires bitsandbytes ≥0.41 (verified 0.49.2 in env).
+        # Numerical behavior is well-characterized in the LLM finetuning community
+        # (LoRA/QLoRA workflows) and matches AdamW within a few percent on convergence.
+        try:
+            from bitsandbytes.optim import AdamW8bit
+        except ImportError as e:
+            raise ImportError(
+                "optimizer_kind='adamw_8bit' requires bitsandbytes; install or "
+                "fall back to 'adamw' (memory cost ≈ +600 MB per GPU at num_domains=9)."
+            ) from e
+        return AdamW8bit(groups, betas=(0.9, 0.999))
+    raise ValueError(
+        f"unknown optimizer_kind={optimizer_kind!r} (expected 'adamw' | 'adamw_8bit')"
+    )

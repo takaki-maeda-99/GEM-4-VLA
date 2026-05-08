@@ -121,10 +121,18 @@ def main(cfg_path: str) -> None:
     )
     image_tx = SiglipImageTransform(size=C.SIGLIP_IMAGE_SIZE, training=False)
 
+    # ``cfg.eval.domain_id`` selects which DA row the policy uses at inference.
+    # Single-domain LIBERO eval keeps 0 (matches how every LIBERO ckpt was
+    # trained). For an OXE-pretrained ckpt, set this to the LIBERO domain_id
+    # used during finetune (or to the OXE domain_id closest to the deploy
+    # embodiment when probing zero-shot transfer). v37 ckpts also embed a
+    # per-domain norm-stats manifest in meta.json; use that to pick the
+    # right unnorm_key when finetuning, instead of relying on cfg.data.stats_path.
+    eval_domain_id = int(cfg.eval.get("domain_id", 0))
     policy = XVLAAdapterPolicy(
         model=model, tokenizer=tok, image_transform=image_tx,
         norm_stats=stats, action_chunk_len=policy_cfg.action_chunk_len,
-        domain_id=0,
+        domain_id=eval_domain_id,
         compile_mode=str(cfg.eval.get("compile_mode", "off")),
         action_format=str(cfg.data.get("action_format", "native")),
         proprio_stats=proprio_stats,

@@ -1,0 +1,101 @@
+# V37 step_10000 → LIBERO Spatial finetune.
+#
+# Loads OXE-pretrained weights from outputs/oxe_pretrain_v37/checkpoints/step_10000
+# (saved during the still-running v37 production), expands DA per-domain rows
+# 9 → 10 (the new row 9 is initialized from row 1 = taco_play, also Franka
+# EEF_POS, so the LIBERO row warm-starts from a Franka-trained DA), and
+# fine-tunes on libero_spatial_no_noops with domain_id=9.
+#
+# Hardware: 2× A100 80GB (dl40 GPU 0,1 — paired NV12 same-NUMA, no NCCL_P2P_DISABLE
+# needed). Concurrent with v37 production on GPU 2-7.
+#
+# Launch:
+#   CUDA_VISIBLE_DEVICES=0,1 \
+#   PYTHONPATH=/misc/dl00/takaki/X-VLA-Adapter/src \
+#   /misc/dl00/takaki/vla-gemma-4/.venv-gemma4/bin/accelerate launch \
+#     --config_file configs/accelerate/dl40_2gpu.yaml \
+#     scripts/train.py configs/train/libero_spatial_v37_ft.yaml
+seed: 0
+model:
+  num_domains: 10                          # 9 OXE rows (0-8) + LIBERO row 9
+  compat_profile: x_vla_adapter
+  hidden_dim: 1536
+  num_blocks: 24
+  use_grad_checkpoint: true
+  use_wrist_bridge: false
+  wrist_in_llm: true
+  wrist_view_dropout_p: 0.0                # FT: deploy with wrist always present
+  ungated_streams: false
+  use_soft_prompt: true
+  num_soft_prompt_tokens: 32
+  soft_prompt_in_llm: true
+  prompt_position: after_vision
+  include_proprio_placeholder: false
+  prompt_max_len: 20
+  use_baseline_projectors: false
+  proj_arch: da_2layer
+  proj_hidden_dim: 1536
+  vision_placeholder_mode: unused_range
+  freeze_llm_and_aq: false
+  freeze_action_queries: false
+  wrap_llm_in_no_grad: false
+  log_per_domain_loss: false               # single-domain FT, redundant
+  lora:
+    r: 64
+    alpha: 128
+    target_modules: [q_proj, v_proj]
+    dropout: 0.0
+vision:
+  type: timm
+  model_name: google/siglip-so400m-patch14-224
+language:
+  model_name: google/gemma-4-E2B
+data:
+  type: libero_rlds
+  data_dir: /misc/dl00/takaki/vla-gemma-4/data/modified_libero_rlds
+  dataset_name: libero_spatial_no_noops
+  action_chunk_len: 8
+  # Smaller shuffle buffer to free host RAM for production concurrent running
+  # (production 9 RLDS × 65536 dominates RAM). 16384 is enough for LIBERO
+  # diversity (50 task × ~150 traj each = 7500 trajectories worth = small).
+  shuffle_buffer_size: 16384
+  train: true
+  domain_id: 9                             # LIBERO row 9 (rows 0-8 reserved for OXE)
+  seed: 42
+  unnorm_key: libero_spatial_no_noops
+  stats_path: /misc/dl00/takaki/vla-gemma-4/VLA-Adapter/outputs/LIBERO-Spatial-Pro/dataset_statistics.json
+train:
+  # bs=8 on 4× 40GB GPU (effective batch 32). Tight on 40GB (~36 GB / GPU) but
+  # fits with shuffle_buffer reduced to 16k (host RAM headroom). GC enabled
+  # (mandatory for 40GB at bs=8).
+  batch_size: 8
+  optimizer_kind: adamw_8bit
+  lr: 1.0e-4                               # 0.5× of v37 pretrain LR for FT
+  weight_decay: 0.01
+  max_steps: 15000                         # FT budget; pretrain has done init work
+  freeze_steps: 1500                       # 10% of max_steps
+  warmup_steps: 750                        # 5% of max_steps
+  freeze_group_names: [gemma_lora]
+  schedule_group_names: [gemma_lora, action_queries, scene_projection, soft_prompts]
+  min_lr_ratio: 1.0
+  grad_clip_norm: 1.0
+  ddp_find_unused_parameters: false
+  resume_ckpt: outputs/oxe_pretrain_v37/checkpoints/step_10000
+  resume_da_row_init: random               # row 9 = random (model's default DomainAwareLinear init), no warm-start
+  lr_coefs:
+    gemma_lora:        0.1
+    siglip:            0.0
+    wrist_siglip:      0.0
+    soft_prompts:      0.5
+    action_queries:    0.5
+    scene_projection:  0.5
+    head_projections:  1.0
+    action_head:       1.0
+  save_every: 5000
+  save_dir: outputs/libero_spatial_v37_ft/checkpoints
+  diagnostic_first_n_batches: 50
+wandb:
+  enabled: true
+  project: vla-project
+  name: oxe_v37_step10k_ft_libero_spatial_domain9
+  tags: [libero_spatial, ft, oxe_v37_step10k, domain9, lora_r64]

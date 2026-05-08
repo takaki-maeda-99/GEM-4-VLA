@@ -1,0 +1,107 @@
+# V37 speed trial: 200 steps, no checkpoint save, used to measure step_time
+# under different DDP / NCCL / compile configurations before committing to
+# 100k production. Same data + model + optimizer setup as smoke; only the
+# DDP / parallelism knobs vary across trials (controlled via env vars and
+# the ddp_find_unused_parameters / optimizer_kind / batch_size flags).
+seed: 0
+model:
+  num_domains: 9
+  compat_profile: x_vla_adapter
+  hidden_dim: 1536
+  num_blocks: 24
+  use_grad_checkpoint: true
+  use_wrist_bridge: false
+  wrist_in_llm: true
+  wrist_view_dropout_p: 0.2
+  ungated_streams: false
+  use_soft_prompt: true
+  num_soft_prompt_tokens: 32
+  soft_prompt_in_llm: true
+  prompt_position: after_vision
+  include_proprio_placeholder: false
+  prompt_max_len: 20
+  use_baseline_projectors: false
+  proj_arch: da_2layer
+  proj_hidden_dim: 1536
+  vision_placeholder_mode: unused_range
+  freeze_llm_and_aq: false
+  freeze_action_queries: false
+  wrap_llm_in_no_grad: false
+  lora:
+    r: 64
+    alpha: 128
+    target_modules: [q_proj, v_proj]
+    dropout: 0.0
+vision:
+  type: timm
+  model_name: google/siglip-so400m-patch14-224
+language:
+  model_name: google/gemma-4-E2B
+data:
+  type: oxe_rlds_multidomain
+  data_dir: /misc/dl00/takaki/vla-gemma-4/data/stage3_openx
+  action_chunk_len: 8
+  shuffle_buffer_size: 65536
+  train: true
+  seed: 42
+  sources:
+    - dataset_name: fractal20220817_data
+      domain_id: 0
+      weight: 1.0
+    - dataset_name: taco_play
+      domain_id: 1
+      weight: 1.0
+    - dataset_name: jaco_play
+      domain_id: 2
+      weight: 1.0
+    - dataset_name: viola
+      domain_id: 3
+      weight: 1.0
+    - dataset_name: berkeley_autolab_ur5
+      domain_id: 4
+      weight: 1.0
+    - dataset_name: stanford_hydra_dataset_converted_externally_to_rlds
+      domain_id: 5
+      weight: 1.0
+    - dataset_name: nyu_franka_play_dataset_converted_externally_to_rlds
+      domain_id: 6
+      weight: 1.0
+    - dataset_name: austin_sailor_dataset_converted_externally_to_rlds
+      domain_id: 7
+      weight: 1.0
+    - dataset_name: austin_sirius_dataset_converted_externally_to_rlds
+      domain_id: 8
+      weight: 1.0
+train:
+  batch_size: 8
+  optimizer_kind: adamw_8bit
+  lr: 2.0e-4
+  weight_decay: 0.01
+  max_steps: 200
+  freeze_steps: 0
+  warmup_steps: 50
+  freeze_group_names: []
+  schedule_group_names: []
+  min_lr_ratio: 1.0
+  grad_clip_norm: 1.0
+  # Override from CLI / env in each trial:
+  #   - C1: ddp_find_unused_parameters=false
+  #   - C2: NCCL_P2P_DISABLE not set in env
+  ddp_find_unused_parameters: false   # default; toggled per trial
+  lr_coefs:
+    gemma_lora:        0.1
+    siglip:            0.0
+    wrist_siglip:      0.0
+    soft_prompts:      0.5
+    action_queries:    0.5
+    scene_projection:  0.5
+    head_projections:  1.0
+    action_head:       1.0
+  save_every: null
+  save_dir: null
+  diagnostic_first_n_batches: 0
+wandb:
+  enabled: true
+  project: vla-project
+  name: oxe_pretrain_v37_speed_c1_fup_false
+  tags: [oxe_pretrain, speed_trial, 200_steps]

@@ -714,3 +714,19 @@ Use the local `codex` CLI (model: `gpt-5.5`) as a peer reviewer at the following
 - Default model is set in `~/.codex/config.toml` (`model = "gpt-5.5"`).
 - Per-invocation override: `codex review -c model="gpt-5.5" --uncommitted`.
 - If `codex` is unavailable in the environment, surface this to the user before proceeding past a checkpoint that requires it; do not silently skip.
+
+## Per-Round Codex Audit (non-interactive, MANDATORY when active)
+
+Separate from the diff-based `codex review` flow above. The user has explicitly asked for a **per-round** second-opinion loop on technical claims, design proposals, and audit findings — the kind of judgment that does not produce a diff but still risks being silently wrong (e.g. "the wiring is correct because…", "these safeguards are sufficient because…"). Use this whenever a round would commit you to a non-trivial direction (refactor plan, safety audit, architecture extension proposal, normalization-pipeline design).
+
+Procedure:
+
+1. After producing the round's analysis/proposal, write a self-contained review prompt to `/tmp/codex_review_round{N}.md`. Each prompt must:
+   - Name the audited claims with file:line references.
+   - Ask codex to verify each claim against the actual code, flag inaccuracies, and judge whether proposed safeguards / fixes are sufficient.
+   - End with an explicit GO / GO-WITH-CHANGES / DO-NOT-PROCEED ask.
+2. Run `codex exec --skip-git-repo-check < /tmp/codex_review_round{N}.md`.
+3. Re-verify codex's most actionable corrections against the actual code yourself (do not relay codex verbatim — judge each point).
+4. Report to the user: `✅ valid / △ partial / ❌ rebut` per codex point, with code-confirmed evidence.
+
+Do not skip steps 3-4. Codex output is a peer review, not authority. The point of the loop is two independent reads of the same code, not delegation.

@@ -30,7 +30,14 @@ from torch.utils.data import IterableDataset
 
 def _worker_seed_offset(base_seed: Optional[int]) -> Optional[int]:
     """Combine the user-supplied seed with the current DataLoader worker id
-    so each worker draws an independent random stream.
+    AND the distributed rank so each (rank, worker) draws an independent
+    random stream.
+
+    Without the rank component, all 6 DDP ranks would use the same draw
+    sequence (worker_id=0 on each), which means every rank would see the
+    same domain pick at each step — collapsing effective batch to per-GPU
+    batch and erasing DDP's gradient-averaging benefit. Codex round 8
+    flagged this; fix is to mix rank into the seed.
 
     Returns ``None`` (i.e. fresh OS entropy) if both ``base_seed`` is None
     and there is no worker info — preserving the documented non-reproducible
@@ -38,9 +45,24 @@ def _worker_seed_offset(base_seed: Optional[int]) -> Optional[int]:
     """
     info = torch.utils.data.get_worker_info()
     worker_id = info.id if info is not None else 0
-    if base_seed is None and info is None:
+    # Distributed rank: read from torch.distributed if initialized; falls
+    # back to LOCAL_RANK / RANK env vars (set by accelerate launch).
+    rank = 0
+    try:
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            rank = torch.distributed.get_rank()
+    except Exception:
+        rank = 0
+    if rank == 0:
+        # Fallback to env vars before init / outside torch.distributed
+        import os as _os
+        rank = int(_os.environ.get("RANK", _os.environ.get("LOCAL_RANK", 0)))
+    if base_seed is None and info is None and rank == 0:
         return None
-    return int(base_seed or 0) + worker_id
+    # Multiply rank by a large prime to spread it across the int range
+    # before adding worker_id, so (rank=0, worker=1) and (rank=1, worker=0)
+    # don't collide.
+    return int(base_seed or 0) + 1000003 * int(rank) + int(worker_id)
 
 
 class WeightedMultiDataset(IterableDataset):

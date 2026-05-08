@@ -1,0 +1,31 @@
+# Accelerate launch preset for dl50: 4× RTX 6000 Ada 49GB DDP.
+# Uses GPU 0,1,2,3 = NUMA 0 (CPU 0-15). Intra-NUMA all-reduce path keeps
+# DDP traffic on the same NUMA without going over the cross-socket UPI
+# (dl50 has no NVLink, all GPU-GPU links are PCIe).
+#
+# Launch (no numactl):
+#   CUDA_VISIBLE_DEVICES=0,1,2,3 \
+#     accelerate launch --config_file configs/accelerate/dl50_4gpu.yaml \
+#       scripts/train.py configs/train/oxe_pretrain_v37_speed_dl50.yaml
+#
+# Note: `numactl --cpunodebind=0 --membind=0` was tried and caused rank 0
+# to be SIGKILL'd during the 9-source RLDS shuffle-buffer fill (no kernel
+# OOM in dmesg, no systemd-oomd in journalctl — likely runtime watchdog
+# under the combination of (a) hard NUMA0-only memory cap (193 GB shared
+# by 4 ranks × 12 GB ckpt + 9 RLDS pipelines) and (b) 16 CPUs hosting 4×9
+# TF data pipelines). If you need NUMA-locality, prefer `--preferred=0`
+# (soft) over `--membind=0` (hard).
+compute_environment: LOCAL_MACHINE
+distributed_type: MULTI_GPU
+downcast_bf16: 'no'
+machine_rank: 0
+main_training_function: main
+mixed_precision: bf16
+num_machines: 1
+num_processes: 4
+rdzv_backend: static
+same_network: true
+tpu_env: []
+tpu_use_cluster: false
+tpu_use_sudo: false
+use_cpu: false

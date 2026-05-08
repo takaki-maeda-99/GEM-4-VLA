@@ -11,7 +11,9 @@ from vla_project.models.language.embed_overwrite import scatter_into_embeds
 from vla_project.models.projectors.action_queries import ActionQueryHub
 from vla_project.models.projectors.domain_aware_linear import DomainAwareLinear
 from vla_project.models.projectors.soft_prompts import SoftPromptHub
-from vla_project.training.losses import masked_l1, masked_huber
+from vla_project.training.losses import (
+    masked_l1, masked_huber, masked_l1_per_sample, masked_huber_per_sample,
+)
 from vla_project.training.losses_ee6d import ee6d_loss_components
 
 
@@ -89,6 +91,12 @@ class VLAPolicyConfig:
     ee6d_w_pos: float = 1.0
     ee6d_w_rot: float = 1.0
     ee6d_w_grip: float = 1.0
+    # Multi-domain training: when True, log ``train/loss_by_domain/<id>`` for
+    # each domain present in the batch. Default False (no per-step compute /
+    # log overhead). Diagnostic for catching per-domain collapse that
+    # aggregate ``train/loss`` would hide. Currently supports L1 / Huber loss
+    # types; ee6d falls back to its existing channel split.
+    log_per_domain_loss: bool = False
     use_grad_checkpoint: bool = False
     # Swap scene_proj / proprio_proj from DomainAwareLinear to vla-gemma-4
     # baseline-equivalent MLPs. Required to match the 73% wristb_b16_v2
@@ -827,6 +835,11 @@ class VLAPolicy(nn.Module):
         # 11. loss
         target_a = batch["target_action"]
         amask = batch["action_mask"]
+        # Build a fresh loss-info dict every forward; trainer.py reads it via
+        # ``_last_loss_info`` and logs each entry to wandb. Stale entries from
+        # the prior batch (e.g. a domain that was sampled then absent next step)
+        # would otherwise persist and mislead — codex round 10 #1.
+        loss_info: Dict[str, torch.Tensor] = {}
         if cfg.loss_type == "l1":
             loss = masked_l1(pred, target_a, amask)
         elif cfg.loss_type == "huber":
@@ -838,10 +851,29 @@ class VLAPolicy(nn.Module):
                 + cfg.ee6d_w_rot * comps["rot"]
                 + cfg.ee6d_w_grip * comps["grip"]
             )
-            # Expose per-channel components so the trainer can log them to
-            # wandb without changing forward()'s (pred, loss) contract.
-            self._last_loss_info = {f"train/loss/{k}": v.detach() for k, v in comps.items()}
+            for k, v in comps.items():
+                loss_info[f"train/loss/{k}"] = v.detach()
         else:
             raise ValueError(f"unknown loss_type: {cfg.loss_type}")
+
+        # Per-domain L1/Huber loss decomposition (default off). Adds
+        # ``train/loss_by_domain/<id>`` for each domain present in the current
+        # batch so per-domain collapse can be detected over many steps.
+        # ee6d path keeps its existing channel split; per-domain × per-channel
+        # is deferred (codex round 10 F).
+        if cfg.log_per_domain_loss and cfg.loss_type in ("l1", "huber"):
+            if cfg.loss_type == "l1":
+                per_sample = masked_l1_per_sample(pred, target_a, amask)
+            else:
+                per_sample = masked_huber_per_sample(pred, target_a, amask, beta=cfg.huber_beta)
+            domain_id_b = batch["domain_id"]                # (B,) long
+            for did in range(int(cfg.num_domains)):
+                m = (domain_id_b == did)
+                if m.any():
+                    loss_info[f"train/loss_by_domain/{did}"] = per_sample[m].mean().detach()
+
+        # Single assignment after building so the trainer always sees a
+        # consistent snapshot. Empty dict preserved as-is (no-op for trainer).
+        self._last_loss_info = loss_info
 
         return pred, loss
