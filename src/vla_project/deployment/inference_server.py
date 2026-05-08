@@ -15,6 +15,7 @@ from typing import Literal
 
 import numpy as np
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
@@ -127,14 +128,20 @@ def build_app(
     # rather than letting FastAPI's default 422 responder swallow the event.
     @app.exception_handler(RequestValidationError)
     async def _on_validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
+        # Pydantic v2 errors() includes ctx: {"error": ValueError(...)} when a
+        # field_validator/model_validator raises ValueError. The exception
+        # object is not JSON-serializable; jsonable_encoder converts it via
+        # str(). Without this, F2/F4 validator failures would 500 instead of
+        # returning a clean 422.
+        errors = jsonable_encoder(exc.errors())
         request_id = request.headers.get("X-Request-Id") or uuid.uuid4().hex
         _log_request(
             request_id, elapsed_ms=0.0, state=state, domain_id=domain_id,
             outcome="invalid_request",
             error_class="RequestValidationError",
-            error_msg=str(exc.errors()),
+            error_msg=str(errors),
         )
-        return JSONResponse(status_code=422, content={"detail": exc.errors()})
+        return JSONResponse(status_code=422, content={"detail": errors})
 
     @app.post("/predict", response_model=PredictResponse)
     async def predict(req: PredictRequest, request: Request) -> PredictResponse:
