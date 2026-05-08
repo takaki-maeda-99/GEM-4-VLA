@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import base64
 import io
+import json
+import logging
 from pathlib import Path
 from typing import Any, Literal
 
@@ -28,6 +30,22 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from vla_project.data import constants as C
 
 from vla_project.deployment.schemas import PredictRequest
+
+logger = logging.getLogger("vla_project.deployment.domain_adapter")
+
+# F1 (per docs/superpowers/specs/2026-05-08-server-request-validation-design.md §F1):
+# Image side sanity bounds. Catches replay corruption (1×1) and abusive payloads
+# (100k×100k) before the JPEG decoder is asked to allocate pixel buffers.
+IMAGE_MIN_SIDE: int = 64
+IMAGE_MAX_SIDE: int = 4096
+
+# F3 (per docs/superpowers/specs/2026-05-08-server-request-validation-design.md §F3):
+# Proprio out-of-distribution thresholds. Computed against the normalized values
+# (after q01/q99 mapping). >WARN absorbed by clip + WARNING log; >HARD raises.
+# 10.0 is wide enough to admit legitimate startup poses outside training
+# support but still catches deg/rad swap (rad ≈ 0.5 → deg = 30 → ~30x q-range).
+PROPRIO_OOD_WARN_ABS: float = 1.0
+PROPRIO_OOD_HARD_ABS: float = 10.0
 
 
 class HardFailAssertion(Exception):
@@ -184,6 +202,14 @@ class DomainAdapter:
             wrist = np.zeros((224, 224, 3), dtype=np.uint8)
             wrist_was_provided = False
         proprio_raw = np.asarray(req.proprio, dtype=np.float32)
+        # F3a: non-finite proprio is unconditionally invalid. Catches NaN/inf
+        # from upstream sensor faults or test fixtures; also short-circuits any
+        # downstream normalize/clip that would silently swallow the signal.
+        if not np.isfinite(proprio_raw).all():
+            bad_dims = np.where(~np.isfinite(proprio_raw))[0].tolist()
+            raise ValueError(
+                f"proprio contains non-finite values at dims {bad_dims}"
+            )
         if proprio_raw.shape[0] != self.cfg.proprio.source.total_dim:
             raise ValueError(
                 f"proprio length {proprio_raw.shape[0]} != "
@@ -202,7 +228,19 @@ class DomainAdapter:
     @staticmethod
     def _decode_jpeg_b64(b64_str: str) -> np.ndarray:
         raw = base64.b64decode(b64_str)
-        img = Image.open(io.BytesIO(raw)).convert("RGB")
+        # F1: header-parse-first. Image.open() reads only the JPEG header
+        # (no pixel decode); .size returns (W, H) from the header. We bound
+        # the dimensions before convert("RGB") forces full pixel decode,
+        # so an attacker / corrupt payload can't allocate gigabytes via
+        # an oversized header.
+        img = Image.open(io.BytesIO(raw))
+        w, h = img.size
+        if min(w, h) < IMAGE_MIN_SIDE or max(w, h) > IMAGE_MAX_SIDE:
+            raise ValueError(
+                f"image side ({w}, {h}) out of sanity bound "
+                f"[{IMAGE_MIN_SIDE}, {IMAGE_MAX_SIDE}]"
+            )
+        img = img.convert("RGB")
         return np.asarray(img, dtype=np.uint8)
 
     def _apply_proprio_adapt(self, raw: np.ndarray) -> np.ndarray:
@@ -251,6 +289,32 @@ class DomainAdapter:
         span = q99 - q01
         span = np.where(span == 0, 1.0, span)
         normed = 2.0 * (x - q01) / span - 1.0
+        # F3b: OOD detection happens BEFORE clip. Mask=False dims are not
+        # subject to OOD checks (the model receives the raw value for them).
+        abs_normed = np.abs(normed)
+        # F3b hard: |normed| > PROPRIO_OOD_HARD_ABS → 422. Runs first so the
+        # warn line below is skipped on hard reject (single invalid_request
+        # log is sufficient — see spec §F3 "warn-vs-raise ordering").
+        hard_violations = (abs_normed > PROPRIO_OOD_HARD_ABS) & mask
+        if hard_violations.any():
+            hard_dims = np.where(hard_violations)[0].tolist()
+            max_excess = float((abs_normed * mask).max() - 1.0)
+            raise ValueError(
+                f"proprio normalized |x|>{PROPRIO_OOD_HARD_ABS} at dims "
+                f"{hard_dims} (max excess {max_excess:.2f}); likely unit "
+                f"mismatch (deg/rad swap or wrong proprio_key)"
+            )
+        # F3b warn: |normed| > PROPRIO_OOD_WARN_ABS (and ≤ HARD) → log + clip.
+        warn_violations = (abs_normed > PROPRIO_OOD_WARN_ABS) & mask
+        if warn_violations.any():
+            ood_dims = np.where(warn_violations)[0].tolist()
+            max_excess = float((abs_normed * mask).max() - 1.0)
+            logger.warning(json.dumps({
+                "event": "proprio_ood",
+                "ood_dim_count": len(ood_dims),
+                "ood_max_excess": round(max_excess, 3),
+                "ood_dims": ood_dims,
+            }))
         # Clamp to [-1, +1] (training-time q99 clipping convention).
         normed = np.clip(normed, -1.0, 1.0)
         return np.where(mask, normed, x).astype(np.float32)

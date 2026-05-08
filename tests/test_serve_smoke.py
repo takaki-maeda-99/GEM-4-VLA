@@ -158,6 +158,25 @@ def test_predict_hard_required_wrist_missing_at_request_returns_422(tmp_path):
     assert "wrist" in r.json()["detail"].lower()
 
 
+def test_typo_image_pirmary_returns_422_end_to_end(client):
+    """F4 regression via FastAPI: image_pirmary typo caught before extra='ignore'
+    silently drops it. Exercises the full HTTP path including pydantic
+    model_validator(mode='before')."""
+    body = {
+        "image_pirmary": _b64_jpeg(),  # typo of image_primary
+        "image_primary": _b64_jpeg(),  # also send the correct one so we don't
+                                        # also fail on missing required field
+        "proprio": [0.0] * 7,
+        "instruction": "test",
+    }
+    resp = client.post("/predict", json=body)
+    assert resp.status_code == 422
+    detail = resp.json()["detail"]
+    detail_str = str(detail).lower()
+    assert "image_pirmary" in detail_str
+    assert "did you mean" in detail_str or "image_primary" in detail_str
+
+
 def test_inject_sleep_emits_latency_budget_exceeded(slow_client, caplog):
     """Server still returns 200 within MimicRec's 5s timeout, but the log
     line carries latency_budget_exceeded=true at WARNING level (spec §6).

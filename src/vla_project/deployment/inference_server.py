@@ -1,4 +1,4 @@
-"""FastAPI app factory + /predict + /healthz routes.
+"""FastAPI app factory + /predict + /healthz + /admin/schema routes.
 
 Reads deploy yaml + (optionally) ckpt meta.json, constructs DomainAdapter
 and ChunkPredictor, mounts the FastAPI app. See spec §Section 6 for
@@ -15,18 +15,27 @@ from typing import Literal
 
 import numpy as np
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from vla_project.deployment.domain_adapter import (
     DomainAdapter,
+    IMAGE_MAX_SIDE,
+    IMAGE_MIN_SIDE,
+    PROPRIO_OOD_HARD_ABS,
+    PROPRIO_OOD_WARN_ABS,
     load_deploy_config,
 )
 from vla_project.deployment.predictors.base import ChunkPredictor
 from vla_project.deployment.predictors.hold_position import HoldPositionChunkPredictor
 from vla_project.deployment.predictors.xvla_adapter import XVLAAdapterChunkPredictor
 from vla_project.deployment.runtime import ModelRuntime
-from vla_project.deployment.schemas import PredictRequest, PredictResponse
+from vla_project.deployment.schemas import (
+    INSTRUCTION_MAX_BYTES,
+    PredictRequest,
+    PredictResponse,
+)
 
 
 logger = logging.getLogger("vla_project.deployment")
@@ -122,19 +131,70 @@ def build_app(
             "ready_at_ns": state["ready_at_ns"],
         }
 
+    @app.get("/admin/schema")
+    async def admin_schema() -> dict:
+        """F5: wire-contract introspection. Returns the minimum a client needs
+        to construct valid requests + sanity-check shapes against this server's
+        loaded config. See spec §F5 for field semantics.
+
+        prompt.max_tokens is null in BOTH predictor modes for Phase 0 — the
+        server does not tokenize yet, so reporting a max_tokens value would
+        imply an enforced ceiling that does not exist. Phase 1 will populate
+        the field when XVLAAdapterChunkPredictor.predict() actually
+        tokenizes the instruction.
+        """
+        return {
+            "predictor": state["predictor_class"],
+            "ckpt": {
+                "expected_unnorm_key": cfg.ckpt.expected_unnorm_key,
+                "expected_action_chunk_len": cfg.ckpt.expected_action_chunk_len,
+                "expected_action_dim": cfg.ckpt.expected_action_dim,
+                "expected_proprio_dim": cfg.ckpt.expected_proprio_dim,
+            },
+            "wrist_hard_required": wrist_hard_required,
+            "request_fields": {
+                "scene_image": cfg.request_fields.scene_image,
+                "wrist_image": cfg.request_fields.wrist_image,
+                "proprio": cfg.request_fields.proprio,
+                "instruction": cfg.request_fields.instruction,
+            },
+            "proprio": {
+                "source": {
+                    "components": [
+                        {"name": c.name, "dims": c.dims, "units": c.units}
+                        for c in cfg.proprio.source.components
+                    ],
+                    "total_dim": cfg.proprio.source.total_dim,
+                },
+            },
+            "image": {"min_side": IMAGE_MIN_SIDE, "max_side": IMAGE_MAX_SIDE},
+            "instruction": {"max_bytes": INSTRUCTION_MAX_BYTES},
+            "prompt": {"max_tokens": None},  # Phase 0 deferral — see docstring
+            "proprio_ood": {
+                "warn_threshold": PROPRIO_OOD_WARN_ABS,
+                "hard_threshold": PROPRIO_OOD_HARD_ABS,
+            },
+        }
+
     # Pydantic body-validation errors fire BEFORE the route body, so attach
     # an exception handler that logs them through our structured channel
     # rather than letting FastAPI's default 422 responder swallow the event.
     @app.exception_handler(RequestValidationError)
     async def _on_validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
+        # Pydantic v2 errors() includes ctx: {"error": ValueError(...)} when a
+        # field_validator/model_validator raises ValueError. The exception
+        # object is not JSON-serializable; jsonable_encoder converts it via
+        # str(). Without this, F2/F4 validator failures would 500 instead of
+        # returning a clean 422.
+        errors = jsonable_encoder(exc.errors())
         request_id = request.headers.get("X-Request-Id") or uuid.uuid4().hex
         _log_request(
             request_id, elapsed_ms=0.0, state=state, domain_id=domain_id,
             outcome="invalid_request",
             error_class="RequestValidationError",
-            error_msg=str(exc.errors()),
+            error_msg=str(errors),
         )
-        return JSONResponse(status_code=422, content={"detail": exc.errors()})
+        return JSONResponse(status_code=422, content={"detail": errors})
 
     @app.post("/predict", response_model=PredictResponse)
     async def predict(req: PredictRequest, request: Request) -> PredictResponse:
