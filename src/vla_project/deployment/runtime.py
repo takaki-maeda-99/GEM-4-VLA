@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Dict, Tuple
 
 import torch
+from huggingface_hub import snapshot_download
 
 from vla_project.data import constants as C
 from vla_project.data.transforms.image import SiglipImageTransform
@@ -42,6 +43,56 @@ def _resolve_dtype(name: str) -> torch.dtype:
     if name not in _DTYPE_MAP:
         raise ValueError(f"unsupported dtype {name!r} (expected bf16 | fp32)")
     return _DTYPE_MAP[name]
+
+
+def _resolve_ckpt_dir(ckpt_dir: str | Path) -> Path:
+    """Resolve ckpt_dir → local directory containing meta.json + model.pt.
+
+    Accepts:
+      - a local directory path (existing) → returned as-is.
+      - an HF model repo id ``org/repo`` (no local path) → ``snapshot_download``
+        the whole repo to the HF cache and return that path.
+      - an HF model repo + subfolder ``org/repo/subfolder`` (e.g.
+        ``takaki99/so101-v46/step_2000``) → ``snapshot_download`` with
+        ``allow_patterns=[f"{subfolder}/*"]`` and return the subfolder
+        inside the cache.
+
+    The HF cache is `~/.cache/huggingface/hub/` by default, so subsequent
+    loads are free.
+    """
+    p = Path(ckpt_dir)
+    if p.exists():
+        return p
+    s = str(ckpt_dir)
+    # Reject absolute / relative-with-prefix paths from the HF heuristic
+    # (codex round 5): a missing absolute path like "/foo/bar" is clearly
+    # a local-path typo, not an HF repo id. HF repo ids never start with
+    # "/", ".", or contain "..".
+    if s.startswith("/") or s.startswith(".") or ".." in s.split("/"):
+        raise FileNotFoundError(f"ckpt_dir {ckpt_dir!r} not found locally")
+    parts = s.split("/")
+    if len(parts) == 2:
+        # bare repo_id like "takaki99/so101-v46" — pull everything
+        local = Path(snapshot_download(repo_id=str(ckpt_dir), repo_type="model"))
+        return local
+    if len(parts) == 3:
+        # repo_id + subfolder like "takaki99/so101-v46/step_2000"
+        repo_id = "/".join(parts[:2])
+        subfolder = parts[2]
+        local = Path(snapshot_download(
+            repo_id=repo_id, repo_type="model",
+            allow_patterns=[f"{subfolder}/*"],
+        ))
+        sub = local / subfolder
+        if not sub.is_dir():
+            raise FileNotFoundError(
+                f"resolved HF repo {repo_id!r} but subfolder {subfolder!r} not present in download"
+            )
+        return sub
+    raise FileNotFoundError(
+        f"ckpt_dir {ckpt_dir!r} not found locally and not in 'org/repo' or "
+        f"'org/repo/subfolder' HF form (got {len(parts)} path components)"
+    )
 
 
 class ModelRuntime:
@@ -78,7 +129,9 @@ class ModelRuntime:
         torch_compile: str = "off",
         warmup_iters: int = 1,
     ) -> "ModelRuntime":
-        ckpt_dir = Path(ckpt_dir)
+        # Accept local path or HF repo id (see _resolve_ckpt_dir). HF
+        # downloads are cached at ~/.cache/huggingface/hub/.
+        ckpt_dir = _resolve_ckpt_dir(ckpt_dir)
         meta_path = ckpt_dir / "meta.json"
         if not meta_path.is_file():
             raise MetaJsonError(f"missing meta.json under {ckpt_dir}")

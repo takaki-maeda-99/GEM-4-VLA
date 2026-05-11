@@ -117,9 +117,24 @@ units). See [`configs/deploy/_template.yaml`](configs/deploy/_template.yaml)
 for the schema and [`configs/deploy/so101_v46.yaml`](configs/deploy/so101_v46.yaml)
 for a working SO101 example.
 
+`--checkpoint` accepts either a local directory or a Hugging Face repo
+id (`org/repo` or `org/repo/subfolder`). When given an HF id,
+`ModelRuntime.from_export` calls `huggingface_hub.snapshot_download` and
+caches under `~/.cache/huggingface/hub/`; subsequent loads are free.
+
 ```bash
-# Pick a free GPU; if another DDP job is on the same node also pass
-# --main_process_port to avoid 29500 collision (accelerate default).
+# Load directly from Hugging Face Hub (preferred for deploy: reproducible,
+# no local-state coupling).
+CUDA_VISIBLE_DEVICES=5 \
+  uv run python scripts/serve.py \
+    --predictor xvla_adapter \
+    --checkpoint takaki99/so101-v46/step_2000 \
+    --deploy-config configs/deploy/so101_v46.yaml \
+    --domain-id 9 \
+    --host 127.0.0.1 \
+    --port 8001
+
+# Or use a local checkpoint directory (faster for in-development iteration).
 CUDA_VISIBLE_DEVICES=5 \
   uv run python scripts/serve.py \
     --predictor xvla_adapter \
@@ -136,6 +151,9 @@ curl http://127.0.0.1:8001/healthz
 #   proprio (raw client units, per deploy yaml proprio.source), instruction}
 # Response: {"actions": list[list[float]]}  shape (T, A) in native units.
 ```
+
+Available HF ckpts:
+- [`takaki99/so101-v46/step_2000`](https://huggingface.co/takaki99/so101-v46/tree/main/step_2000) — early FT checkpoint (smoke-verified, not yet evaluated on real robot)
 
 A minimal smoke client lives nowhere yet; the test harness in
 `tests/deployment/` exercises both predictor paths and is the easiest
