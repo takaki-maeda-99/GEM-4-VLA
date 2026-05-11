@@ -1,0 +1,124 @@
+# V46 SO101 FT: v44 step_30000 -> new domain (SO101) DA row 9, random init.
+#
+# Base: configs/train/oxe_pretrain_v44_nb18even_proper_mlp_lora_alllinear_dl50_bs8.yaml
+#   step_30000 (longest available v44 OXE pretrain). num_domains 9 → 10
+#   to make room for a fresh SO101 row.
+#
+# Diffs from configs/train/libero_spatial_v44_step19k_ft.yaml:
+#   - data.type: libero_rlds -> so101_lerobot
+#   - data.root / stats_path / unnorm_key point to the v3->v2.1 conversion
+#       and Q99 stats produced by:
+#         tools/convert_so101_v3_to_v21.py --out_root data/converted/takaki99_test_so101_v21
+#         tools/compute_norm_stats_so101.py --converted_root ... --dataset_key so101_test
+#   - data.fps: 10 (matches dataset meta/info.json)
+#   - resume_ckpt: v44 step_19000 -> v44 step_30000
+#   - max_steps: 15000 -> 5000 (dataset is 62ep/6303 frames; FT budget tuned
+#       to avoid overfit on a tiny single-task set)
+#   - freeze_steps: 1500 -> 500 (10% of max_steps)
+#   - warmup_steps:  750 -> 250 (5% of max_steps)
+#   - save_every: 1000 -> 500
+#   - save_dir / wandb name + tags reflect SO101 source
+#
+# All architecture flags match v44 pretrain (proprio_in_llm, ungated_streams,
+# proper_residual, proper_mlp, layer_scale 1e-4, all-linear LoRA target).
+#
+# Action representation (handled inside LeRobotSO101Dataset):
+#   action 7-dim = [delta_xyz (3), delta_rotvec via SO(3) logmap (3), gripper/100 (1)]
+#   proprio 8-dim = [ee_pos (3), ee_rotvec (3), gripper/100 (1), 0 pad (1)]
+#
+# Hardware: dl50 single-GPU (RTX 6000 Ada 49GB). bs=8 + GC=on + compile=null
+# matches the v44 LIBERO FT recipe.
+#
+# Launch:
+#   cd /misc/dl00/takaki/X-VLA-Adapter
+#   mkdir -p outputs/so101_v46_step30k_ft_dl50
+#   MALLOC_ARENA_MAX=2 MALLOC_TRIM_THRESHOLD_=0 \
+#   CUDA_VISIBLE_DEVICES=0 \
+#     nohup .venv/bin/accelerate launch \
+#       --config_file configs/accelerate/dl50_1gpu.yaml \
+#       scripts/train.py configs/train/so101_v46_step30k_ft_dl50.yaml \
+#       > outputs/so101_v46_step30k_ft_dl50/launch.log 2>&1 &
+seed: 0
+model:
+  num_domains: 10                          # 9 OXE (0-8) + SO101 row 9
+  compat_profile: x_vla_adapter
+  hidden_dim: 1536
+  num_blocks: 18                           # match v44
+  action_head_layer_mode: even             # match v44
+  use_grad_checkpoint: true                # FT: GC=on, compile=null
+  use_wrist_bridge: false
+  wrist_in_llm: true
+  wrist_view_dropout_p: 0.0                # FT: deploy with wrist always present
+  ungated_streams: true                    # match v44
+  use_proper_residual: true                # match v44
+  proper_ffn_mode: proper_mlp              # match v44
+  layer_scale_init: 0.0001                 # match v44
+  mlp_ratio: 1.0                           # match v44
+  use_soft_prompt: true
+  num_soft_prompt_tokens: 32
+  soft_prompt_in_llm: true
+  prompt_position: after_vision
+  include_proprio_placeholder: true        # match v44 (proprio_in_llm req)
+  proprio_in_llm: true                     # match v44
+  prompt_max_len: 20
+  use_baseline_projectors: false
+  proj_arch: da_2layer
+  proj_hidden_dim: 1536
+  vision_placeholder_mode: unused_range
+  freeze_llm_and_aq: false
+  freeze_action_queries: false
+  wrap_llm_in_no_grad: false
+  log_per_domain_loss: false               # single-domain FT
+  lora:
+    r: 64
+    alpha: 128
+    target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]  # match v44 all-linear
+    dropout: 0.0
+vision:
+  type: timm
+  model_name: google/siglip-so400m-patch14-224
+language:
+  model_name: google/gemma-4-E2B
+data:
+  type: so101_lerobot
+  root: data/converted/takaki99_test_so101_v21
+  repo_id: takaki99/test_so101             # passed to LeRobotDataset for metadata only (root overrides downloads)
+  unnorm_key: so101_test
+  stats_path: data/norm_stats/so101_test.json
+  fps: 10
+  action_chunk_len: 8
+  domain_id: 9                             # SO101 row 9 (OXE = 0-8)
+  download_videos: false                   # videos already on disk via conversion
+  last_action_chunk_mode: zero
+train:
+  batch_size: 8
+  optimizer_kind: adamw_8bit
+  lr: 1.0e-4                               # 0.5x pretrain LR for FT (match v44 FT)
+  weight_decay: 0.01
+  max_steps: 5000
+  freeze_steps: 500                        # 10% of max_steps
+  warmup_steps: 250                        # 5% of max_steps
+  freeze_group_names: [gemma_lora]
+  schedule_group_names: [gemma_lora, action_queries, scene_projection, soft_prompts]
+  min_lr_ratio: 1.0
+  grad_clip_norm: 1.0
+  ddp_find_unused_parameters: false
+  resume_ckpt: outputs/oxe_pretrain_v44_nb18even_proper_mlp_lora_alllinear_dl50_bs8/checkpoints/step_30000
+  resume_da_row_init: random               # MANDATORY: new DA row (SO101) must be random-init
+  lr_coefs:
+    gemma_lora:        0.1
+    siglip:            0.0
+    wrist_siglip:      0.0
+    soft_prompts:      0.5
+    action_queries:    0.5
+    scene_projection:  0.5
+    head_projections:  1.0
+    action_head:       1.0
+  save_every: 500
+  save_dir: outputs/so101_v46_step30k_ft_dl50/checkpoints
+  diagnostic_first_n_batches: 50
+wandb:
+  enabled: true
+  project: vla-project
+  name: oxe_v44_step30k_ft_so101_domain9
+  tags: [so101, ft, oxe_v44_proper_mlp, step30k, domain9, lora_alllinear, nb18, even, proprio_in_llm, ungated_streams, proper_residual, proper_mlp, layerscale1e-4, dl50, gpu0, random_da, ee_delta, logmap]

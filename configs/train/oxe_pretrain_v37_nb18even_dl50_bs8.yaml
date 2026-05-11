@@ -1,0 +1,144 @@
+# V37 OXE pretrain, dl50 production retry: bs=8 + LoRA r=32 + earlier
+# warmup. Replaces ../oxe_pretrain_v37_nb18even_dl50.yaml (bs=16 run
+# crashed at ~step 7000 with rank-2 SIGSEGV after host RAM was exhausted
+# by an unbounded tf.data prefetch; root-cause patched in
+# rlds_oxe_dataset.py via with_ram_budget(1)).
+#
+# Diffs from the bs=16 config:
+#   - train.batch_size: 16 → 8 (per-rank; eff_bs 64 → 32)
+#   - train.freeze_steps: 10000 → 5000 (10% → 5% of max_steps; gemma_lora
+#     starts learning earlier)
+#   - train.warmup_steps: 5000 → 2500 (5% → 2.5% of max_steps)
+#   - train.save_every: 10000 → 5000 (defense in depth — bs=16 run lost
+#     7k steps because save_every=10000 had not fired)
+#
+# Hardware: 4× RTX 6000 Ada 49GB (NUMA0 GPU 0-3), DDP intra-NUMA PCIe.
+# LR kept at 2e-4 (no scaling for the eff_bs reduction; same "安全側" as
+# before, and bs=8 sees more update steps per epoch which already biases
+# toward more aggressive optimization).
+#
+# First-step compile: torch.compile guards on shape, so the bs=16 cache
+# in /tmp/torchinductor_takaki/ is NOT reusable. Expect ~6 min recompile
+# on the first step (same order as the bs=16 trial).
+#
+# Launch (use nohup so the OS owns the process, not the launching shell).
+# Uses the self-sufficient local .venv (922e9cb dropped the vla-gemma-4/
+# .venv-gemma4 borrow); vla_project is installed editable so no PYTHONPATH
+# is needed.
+#
+# MALLOC_ARENA_MAX=2 + MALLOC_TRIM_THRESHOLD_=0: glibc allocator constraints
+# to mitigate the host-RAM monotonic decline observed in the bs=16 first
+# attempt and the bs=8 first retry. with_ram_budget(1) only caps tf.data
+# autotune (prefetch); the residual leak is most likely TF/dlimp native
+# buffer + glibc fragmentation from JPEG decode + parallel_calls=16 across
+# 9 RLDS pipelines on rank 0 only (Accelerate dispatch_batches=True). These
+# env vars are the cheapest A/B test for that hypothesis.
+#   cd /misc/dl00/takaki/X-VLA-Adapter
+#   mkdir -p outputs/oxe_pretrain_v37_nb18even_dl50_bs8
+#   MALLOC_ARENA_MAX=2 MALLOC_TRIM_THRESHOLD_=0 \
+#   CUDA_VISIBLE_DEVICES=0,1,2,3 \
+#   nohup .venv/bin/accelerate launch \
+#     --config_file configs/accelerate/dl50_4gpu.yaml \
+#     scripts/train.py configs/train/oxe_pretrain_v37_nb18even_dl50_bs8.yaml \
+#     > outputs/oxe_pretrain_v37_nb18even_dl50_bs8/launch.log 2>&1 &
+seed: 0
+model:
+  num_domains: 9
+  compat_profile: x_vla_adapter
+  hidden_dim: 1536
+  num_blocks: 18                           # 1-skip across 35 Gemma layers
+  action_head_layer_mode: even             # taps Gemma layers 1,3,5,...,35
+  use_grad_checkpoint: false               # mandatory off when compile=on
+  use_wrist_bridge: false
+  wrist_in_llm: true
+  wrist_view_dropout_p: 0.2
+  ungated_streams: false
+  use_soft_prompt: true
+  num_soft_prompt_tokens: 32
+  soft_prompt_in_llm: true
+  prompt_position: after_vision
+  include_proprio_placeholder: false
+  prompt_max_len: 20
+  use_baseline_projectors: false
+  proj_arch: da_2layer
+  proj_hidden_dim: 1536
+  vision_placeholder_mode: unused_range
+  freeze_llm_and_aq: false
+  freeze_action_queries: false
+  wrap_llm_in_no_grad: false
+  lora:
+    r: 64
+    alpha: 128
+    target_modules: [q_proj, v_proj]
+    dropout: 0.0
+vision:
+  type: timm
+  model_name: google/siglip-so400m-patch14-224
+language:
+  model_name: google/gemma-4-E2B
+data:
+  type: oxe_rlds_multidomain
+  data_dir: /misc/dl00/takaki/vla-gemma-4/data/stage3_openx
+  action_chunk_len: 8
+  shuffle_buffer_size: 65536
+  train: true
+  seed: 42
+  sources:
+    - dataset_name: fractal20220817_data
+      domain_id: 0
+      weight: 1.0
+    - dataset_name: taco_play
+      domain_id: 1
+      weight: 1.0
+    - dataset_name: jaco_play
+      domain_id: 2
+      weight: 1.0
+    - dataset_name: viola
+      domain_id: 3
+      weight: 1.0
+    - dataset_name: berkeley_autolab_ur5
+      domain_id: 4
+      weight: 1.0
+    - dataset_name: stanford_hydra_dataset_converted_externally_to_rlds
+      domain_id: 5
+      weight: 1.0
+    - dataset_name: nyu_franka_play_dataset_converted_externally_to_rlds
+      domain_id: 6
+      weight: 1.0
+    - dataset_name: austin_sailor_dataset_converted_externally_to_rlds
+      domain_id: 7
+      weight: 1.0
+    - dataset_name: austin_sirius_dataset_converted_externally_to_rlds
+      domain_id: 8
+      weight: 1.0
+train:
+  batch_size: 8                            # ↓ from 16
+  optimizer_kind: adamw_8bit
+  lr: 2.0e-4                               # 安全側、eff_bs 32 でも no linear scale
+  weight_decay: 0.01
+  max_steps: 100000
+  freeze_steps: 5000                       # ↓ from 10000 (5%)
+  warmup_steps: 2500                       # ↓ from 5000 (2.5%)
+  freeze_group_names: [gemma_lora]
+  schedule_group_names: [gemma_lora, action_queries, scene_projection, soft_prompts]
+  min_lr_ratio: 1.0
+  grad_clip_norm: 1.0
+  ddp_find_unused_parameters: false
+  compile_mode: default
+  lr_coefs:
+    gemma_lora:        0.1
+    siglip:            0.0
+    wrist_siglip:      0.0
+    soft_prompts:      0.5
+    action_queries:    0.5
+    scene_projection:  0.5
+    head_projections:  1.0
+    action_head:       1.0
+  save_every: 5000                         # ↓ from 10000
+  save_dir: outputs/oxe_pretrain_v37_nb18even_dl50_bs8/checkpoints
+  diagnostic_first_n_batches: 100
+wandb:
+  enabled: true
+  project: vla-project
+  name: oxe_pretrain_v37_nb18even_dl50_4gpu_bs8_compile_freeze5k
+  tags: [oxe_pretrain, rlds, multidomain, da_2layer, soft_prompt_llm, wrist_in_llm, wrist_drop02, lora_r64, 9_domains, dl50, 4gpu, bs8, nb18, even, compile_default, gc_off, scratch, freeze5k]

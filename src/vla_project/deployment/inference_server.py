@@ -103,11 +103,14 @@ def build_app(
             gripper_native_midpoint=cfg.holdposition.gripper_native_midpoint,
         )
     else:
+        # Phase 1: runtime now holds the model + tokenizer + image_transform
+        # (built in ModelRuntime.from_export). Pass them to the predictor so
+        # it can build a batch dict identical to the training pipeline.
         predictor = XVLAAdapterChunkPredictor(
             runtime=runtime,
-            tokenizer=None,                 # Phase 1
-            image_transform=None,           # Phase 1
-            action_q99=norm_stats[cfg.ckpt.expected_unnorm_key]["action"] if norm_stats else None,
+            tokenizer=runtime.tokenizer,
+            image_transform=runtime.image_transform,
+            action_q99=norm_stats[cfg.ckpt.expected_unnorm_key]["action"],
             action_chunk_len=cfg.ckpt.expected_action_chunk_len,
             action_dim=cfg.ckpt.expected_action_dim,
             domain_id=domain_id,

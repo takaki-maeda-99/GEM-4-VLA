@@ -24,28 +24,10 @@ tensor that the HF path uses.
 """
 from __future__ import annotations
 
-import sys
 from typing import Optional
 
 import torch
 import torch.nn as nn
-
-
-def _ensure_prismatic_on_path() -> None:
-    """Make ``prismatic.*`` importable.
-
-    The vla-gemma-4 codebase isn't pip-installed; we add its path via the
-    ``PYTHONPATH`` env var at launch (see configs/train/libero_spatial_v25.yaml
-    docstring). This helper re-asserts the path so importing here from a
-    different sys.path order still finds it.
-    """
-    candidates = [
-        "/misc/dl00/takaki/vla-gemma-4/VLA-Adapter",
-        "/misc/dl00/takaki/vla-gemma-4",
-    ]
-    for p in candidates:
-        if p not in sys.path:
-            sys.path.insert(0, p)
 
 
 class SigLIPTimmEncoder(nn.Module):
@@ -70,7 +52,6 @@ class SigLIPTimmEncoder(nn.Module):
         self.image_size = image_size
         self.backbone: Optional[nn.Module] = None
         if not _skip_load:
-            _ensure_prismatic_on_path()
             from prismatic.models.backbones.vision.siglip_vit import SigLIPViTBackbone
             self.backbone = SigLIPViTBackbone(
                 vision_backbone_id="siglip-vit-so400m",

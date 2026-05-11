@@ -158,22 +158,43 @@ class RLDSOxeDataset(IterableDataset):
         ds_raw = ds_raw.filter(
             lambda traj: tf.shape(traj["action"])[0] >= _chunk_len
         )
+        # ``goal_relabeling_strategy=None``: skip the "uniform" relabeling
+        # because we are not a goal-conditioned policy. With "uniform" set,
+        # ``goal_relabeling.py`` copies every observation image into
+        # ``task["image_*"]``, which doubles the encoded JPEG payload per
+        # element (primary+wrist × 2 = 4 images). This payload is what was
+        # blowing up rank-0 host RAM through the long-running shuffle —
+        # removing it cuts the per-element baseline roughly in half.
         ds_t = apply_trajectory_transforms(
             ds_raw.repeat(),
             window_size=1,
             future_action_window_size=self.action_chunk_len - 1,
             skip_unlabeled=True,
-            goal_relabeling_strategy="uniform",
+            goal_relabeling_strategy=None,
             num_parallel_calls=1,
             train=self.train,
         ).flatten(num_parallel_calls=1)
-        ds_t = ds_t.shuffle(self.shuffle_buffer_size)
+        # Decode + resize FIRST, then shuffle uniform-byte uint8 frames.
+        # Old order (shuffle → frame_transforms) holds variable-size encoded
+        # JPEGs in the shuffle buffer: as samples cycle through, the resident
+        # bytes drift toward the worst-case max element size, producing the
+        # observed ~12 MB/step host-RAM creep that survived ``with_ram_budget(1)``
+        # and ``MALLOC_ARENA_MAX=2`` (gdb-malloc_trim showed 99.9% of resident
+        # bytes were genuinely live data, not glibc fragmentation). Frames
+        # post-decode are 224×224×3 uint8 (primary + wrist) ≈ 300 KB each,
+        # uniform across the dataset, so the shuffle buffer's resident byte
+        # count is bounded at ``shuffle_buffer_size × 300 KB`` instead.
         dataset = apply_frame_transforms(
             ds_t,
             resize_size=(IMAGE_SIZE, IMAGE_SIZE),
             num_parallel_calls=16,
             train=self.train,
         )
+        dataset = dataset.shuffle(self.shuffle_buffer_size)
+        # Cap tf.data autotune RAM (covers prefetch / interleave). Does not
+        # constrain the explicit shuffle(N) buffer above — that's bounded by
+        # the now-uniform per-element size, not by autotune.
+        dataset = dataset.with_ram_budget(1)
         return dataset
 
     @staticmethod
