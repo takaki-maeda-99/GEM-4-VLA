@@ -138,7 +138,7 @@ def load_pretrain_with_da_row_expansion(
     model: nn.Module,
     *,
     new_num_domains: int,
-    init_strategy: str = "copy_row_1",
+    init_strategy: str = "random",
 ) -> Dict[str, Any]:
     """Resume from a v37-style checkpoint when the FT model has a larger
     ``num_domains`` than the saved one (e.g. 9 → 10 for adding LIBERO as
@@ -152,15 +152,34 @@ def load_pretrain_with_da_row_expansion(
     normally with strict shape checks.
 
     init_strategy:
-      - "copy_row_1": fill new rows by replicating row 1 from the source
-        (taco_play / Franka EEF — closest to LIBERO Franka). Default.
+      - "random" (default): leave new rows at the model's default init.
+        SAFE for cross-dataset FT — empirically required (2026-05-10) when
+        adding LIBERO as a new DA row to a pretrain ckpt trained on OXE
+        sources whose proprio dim semantics differ from LIBERO's.
       - "copy_row_<n>": replicate from a specific source row.
-      - "random": leave new rows at the model's default init (don't touch).
+        UNSAFE for cross-dataset FT: OXE per-source proprio is canonicalized
+        to 8-dim by zero-padding sources whose state has fewer dims, so
+        different OXE rows have different "zero" dims (e.g. taco_play row 1
+        has proprio dim 6 std=0.00 across the dataset, while LIBERO uses
+        dim 6 as the gripper bit with std 0.89). Copying = "ignore the
+        most informative target dim". Emits a runtime warning.
       - "zero": zero-fill new rows.
 
     Returns the meta.json contents from the source ckpt (unchanged), so the
     caller can decide whether to merge / inherit it into the FT checkpoint.
     """
+    if init_strategy.startswith("copy_row_"):
+        import warnings as _w
+        _w.warn(
+            "load_pretrain_with_da_row_expansion: init_strategy={!r} copies a "
+            "source row's per-domain weights into new FT row(s). For "
+            "cross-dataset FT (e.g. LIBERO from OXE pretrain) this is unsafe "
+            "because per-source proprio dims have different zero-pad "
+            "structure. Use init_strategy='random' unless you have verified "
+            "the source/target proprio semantics match. See CLAUDE.md "
+            "section 'DA Row Init for FT (DO NOT COPY)'.".format(init_strategy),
+            stacklevel=2,
+        )
     in_path = Path(in_dir)
     if not in_path.is_dir():
         raise FileNotFoundError(f"checkpoint dir not found: {in_path}")
@@ -170,6 +189,19 @@ def load_pretrain_with_da_row_expansion(
     meta_path = in_path / "meta.json"
 
     src_state = torch.load(model_pt, map_location="cpu", weights_only=True)
+    # Strip ``_orig_mod.`` prefix that Accelerate's ``unwrap_model`` leaves on
+    # torch.compile'd models when ``keep_torch_compile=True`` (its default).
+    # Pretrain configs with ``compile_mode != "off"`` save such keys; the FT
+    # model passed in here is always uncompiled (compile happens after the
+    # resume call in scripts/train.py), so dst_state has no prefix and src
+    # would otherwise miss every key — silently leaving the FT at its random
+    # init. Pre-strip src keys so loads succeed regardless of how the source
+    # ckpt was saved.
+    if any(k.startswith("_orig_mod.") for k in src_state):
+        src_state = {
+            (k.removeprefix("_orig_mod.") if k.startswith("_orig_mod.") else k): v
+            for k, v in src_state.items()
+        }
     dst_state = model.state_dict()
 
     # Resolve init_strategy → source row index (or special markers).

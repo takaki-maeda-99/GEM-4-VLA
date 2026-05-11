@@ -20,6 +20,10 @@ class MLPResNet(nn.Module):
         gating_init: float = 0.0,
         gating_init_wrist: float = 0.0,
         ungated_streams: bool = False,
+        use_proper_residual: bool = False,
+        proper_ffn_mode: str = "legacy",
+        layer_scale_init: float = 0.0,
+        mlp_ratio: float = 1.0,
     ) -> None:
         super().__init__()
         self.action_dim = action_dim
@@ -36,6 +40,10 @@ class MLPResNet(nn.Module):
                     gating_init=gating_init,
                     gating_init_wrist=gating_init_wrist,
                     ungated_streams=ungated_streams,
+                    use_proper_residual=use_proper_residual,
+                    proper_ffn_mode=proper_ffn_mode,
+                    layer_scale_init=layer_scale_init,
+                    mlp_ratio=mlp_ratio,
                 )
                 for _ in range(num_blocks)
             ]
@@ -44,7 +52,8 @@ class MLPResNet(nn.Module):
         self.fc2 = nn.Linear(hidden_dim, output_dim)
 
     def _run_block(self, blk: nn.Module, x: torch.Tensor,
-                   h_a_i: torch.Tensor, h_t_i: torch.Tensor, p: torch.Tensor,
+                   h_a_i: torch.Tensor, h_t_i: torch.Tensor,
+                   p: Optional[torch.Tensor] = None,
                    h_w_l: Optional[torch.Tensor] = None) -> torch.Tensor:
         return blk(x, h_a=h_a_i, h_t=h_t_i, p=p, h_w_l=h_w_l)
 
@@ -53,7 +62,7 @@ class MLPResNet(nn.Module):
         x: torch.Tensor,                       # [B, T, input_dim]
         h_a: torch.Tensor,                     # [B, num_layers+1, K_a, D]
         h_t: torch.Tensor,                     # [B, num_layers+1, K_t, D]
-        p: torch.Tensor,                       # [B, 1, D]
+        p: Optional[torch.Tensor] = None,      # [B, 1, D] or None when proprio_in_llm=True
         h_w: Optional[torch.Tensor] = None,    # [B, K_w, D]  final-layer wrist (Bridge self-attn pool)
         h_sp: Optional[torch.Tensor] = None,   # [B, K_sp, D] final-layer soft prompt (Bridge self-attn pool)
         h_w_bridge: Optional[torch.Tensor] = None,  # [B, num_blocks+1, K_w_b, D] per-layer wrist (Bridge cross-attn)
