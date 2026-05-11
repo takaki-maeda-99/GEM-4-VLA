@@ -145,13 +145,18 @@ class Trainer:
         save_cfg: Any = None,
         save_norm_stats: Optional[Dict[str, Any]] = None,
         save_tokenizer_settings: Optional[Dict[str, Any]] = None,
+        initial_step: int = 0,
     ) -> List[float]:
-        """Train for exactly ``max_steps`` optimizer steps.
+        """Train until step counter reaches ``max_steps``.
 
         Args:
             dataloader: any iterable of batch dicts.
             save_cfg / save_norm_stats / save_tokenizer_settings: optional
                 metadata bundled into checkpoints when ``cfg.save_dir`` is set.
+            initial_step: starting step for the counter (default 0). Pass the
+                ckpt's step when resuming so the LR scheduler (driven by step)
+                continues from where it left off. The diagnostic_first_n_batches
+                window only fires when initial_step == 0.
         """
         self.model.train()
         # Accelerator.prepare wraps model/optimizer/dataloader for the active
@@ -183,7 +188,9 @@ class Trainer:
 
         losses: List[float] = []
         nan_skip_count = 0
-        step = 0
+        step = int(initial_step)
+        if step > 0 and self.accelerator.is_main_process:
+            print(f"[train] resuming step counter from {step} (max_steps={self.cfg.max_steps})", flush=True)
         last_t = time.perf_counter()
         # Exponential moving average of step time for ETA (smooths out the
         # first JIT-warmed steps and noisy data-loading spikes).
@@ -195,8 +202,9 @@ class Trainer:
         # Per-domain sample counts accumulated over the first
         # diagnostic_first_n_batches batches (B10). Gives a quick view of
         # whether the WeightedMultiDataset draw distribution matches expected
-        # uniform / weighted ratios.
-        diagnostic_n = int(self.cfg.diagnostic_first_n_batches)
+        # uniform / weighted ratios. Skipped on resume (initial_step > 0) —
+        # the diagnostic is for catching first-launch data issues, not mid-run.
+        diagnostic_n = int(self.cfg.diagnostic_first_n_batches) if step == 0 else 0
         domain_counts: Dict[int, int] = {}
         diag_batches_seen = 0
 
@@ -271,18 +279,29 @@ class Trainer:
                 # backward → clip_grad_norm_ (norm of NaN is NaN) →
                 # optimizer.step (param − lr × NaN = NaN) and poisons every
                 # trainable param. No recovery without rewinding to a ckpt,
-                # so discard the whole accumulation window. v37 nb18even bs=8
-                # hit this at ~step 1k.
-                if not torch.isfinite(loss).item():
+                # so discard the whole accumulation window when this happens.
+                #
+                # The check must be DDP-synchronized: rank-local randomness
+                # (wrist_view_dropout, dataloader sharding) means one rank
+                # can hit non-finite while others stay finite. Skipping on a
+                # strict subset of ranks desyncs the next backward/clip/step
+                # NCCL collectives, eventually triggering the watchdog
+                # timeout (1800 s) and a SIGABRT. Re-applies the gather
+                # logic from 1a3db44 (reverted in 0def2dc as part of an
+                # unrelated data-loader rollback). v38 nb35 bs=8 hit the
+                # un-synced version at step 826.
+                loss_finite_local = torch.isfinite(loss).to(torch.uint8).view(1)
+                loss_finite_all = self.accelerator.gather(loss_finite_local)
+                if not bool(loss_finite_all.all().item()):
                     nan_skip_count += 1
                     self.optimizer.zero_grad()
                     accum_i = 0
                     accum_loss_sum = 0.0
                     if self.accelerator.is_main_process:
                         print(
-                            f"[WARN] step {step}: non-finite forward loss "
-                            f"({float(loss.detach()):.6g}); skipping accumulation "
-                            f"(total skipped: {nan_skip_count})",
+                            f"[WARN] step {step}: non-finite forward loss on "
+                            f"some rank (local={float(loss.detach()):.6g}); "
+                            f"skipping accumulation (total skipped: {nan_skip_count})",
                             flush=True,
                         )
                     continue
@@ -297,19 +316,32 @@ class Trainer:
                 # Capture pre-clip total grad norm for diagnostics. Even with
                 # finite forward loss, bf16 backward can still overflow, so
                 # also guard the optimizer step against non-finite norm.
+                # DDP backward allreduces gradients in principle, but the
+                # post-allreduce float() round-trip + per-rank optimizer
+                # state still leaves room for divergence under accumulation,
+                # so we gather the finite-flag here too. v38 nb35 bs=8
+                # surfaced this path as the visible failure (step 826
+                # "non-finite grad_norm (inf)" → 30 min later watchdog SIGABRT).
                 grad_norm = self.accelerator.clip_grad_norm_(
                     self.model.parameters(), self.cfg.grad_clip_norm
                 )
                 grad_norm_val = float(grad_norm) if grad_norm is not None else 0.0
-                if not math.isfinite(grad_norm_val):
+                grad_norm_finite_local = torch.tensor(
+                    [int(math.isfinite(grad_norm_val))],
+                    dtype=torch.uint8,
+                    device=self.accelerator.device,
+                )
+                grad_norm_finite_all = self.accelerator.gather(grad_norm_finite_local)
+                if not bool(grad_norm_finite_all.all().item()):
                     nan_skip_count += 1
                     self.optimizer.zero_grad()
                     accum_i = 0
                     accum_loss_sum = 0.0
                     if self.accelerator.is_main_process:
                         print(
-                            f"[WARN] step {step}: non-finite grad_norm "
-                            f"({grad_norm_val}); skipping optimizer.step "
+                            f"[WARN] step {step}: non-finite grad_norm on "
+                            f"some rank (local={grad_norm_val}); "
+                            f"skipping optimizer.step "
                             f"(total skipped: {nan_skip_count})",
                             flush=True,
                         )

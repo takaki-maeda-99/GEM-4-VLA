@@ -76,6 +76,33 @@ class VLAPolicyConfig:
     # model can still suppress unhelpful streams via the k_task / k_wrist
     # projection weights.
     ungated_streams: bool = False
+    # v42 (2026-05-11): when True, MLPResNetBlock_Pro.forward becomes
+    # ``x + self.ffn(attn_out + x)`` (proper Pre-LN residual stream) instead
+    # of the legacy ``self.ffn(attn_out + x)``. The legacy form is what
+    # VLA-Adapter upstream uses (action_heads.py:409) and is the structural
+    # root cause of "only the deepest action_head block trains" pattern in
+    # v33/v37/v39/v41 — each block fully overwrites x, so shallow block
+    # contributions never reach the output. X-VLA upstream uses the proper
+    # residual form (transformer.py:279-280). Backward compatible: legacy
+    # ckpts load and forward unchanged when flag is False (default).
+    use_proper_residual: bool = False
+    # v44 (2026-05-11): additional knobs to make ``use_proper_residual`` actually
+    # produce a proper Pre-LN residual stream. Codex round 8 found the v42 path
+    # (legacy ffn = LN→Linear→ReLU + residual) was structurally biased — ReLU at
+    # the end forces non-negative residual contributions, x drifts monotonically
+    # → grad_max 221k bursts.
+    #   - proper_ffn_mode:
+    #       "legacy" (default): LN → Linear → ReLU  (one-sided, v42 bug)
+    #       "linear_only":      LN → Linear        (signed, no activation)
+    #       "proper_mlp":       LN → Linear → GELU → Linear  (X-VLA upstream style)
+    #   - layer_scale_init: when > 0, allocate per-channel γ Parameter initialized
+    #     to this value and apply ``x + γ * ffn(...)``. CaiT/timm convention,
+    #     1e-4 keeps the branch ~identity at init.
+    #   - mlp_ratio: hidden expansion for proper_mlp (mid = dim * mlp_ratio).
+    #     1.0 keeps param count minimal, 4.0 matches X-VLA Mlp default.
+    proper_ffn_mode: str = "legacy"
+    layer_scale_init: float = 0.0
+    mlp_ratio: float = 1.0
     # ``use_soft_prompt=False`` skips the soft_prompt_hub allocation and
     # passes h_sp=None to the action head. The 73% vla-gemma-4 baseline
     # (libero finetune) ran with ``num_pretrain_datasets=0`` so its
@@ -207,6 +234,18 @@ class VLAPolicyConfig:
     # with vs without wrist cameras (RoPE positions stay stable).
     wrist_in_llm: bool = False
     wrist_view_dropout_p: float = 0.0
+    # ``proprio_in_llm=True`` (v41+): scatter proprio_proj output into the
+    # reserved PROPRIO_PLACEHOLDER slot in the LLM input embeddings, and pass
+    # ``p=None`` to the action_head (so the adapter bank inside each block is
+    # just ``h_a`` — LLM hidden states at action positions, which now also
+    # encode proprio). This forces all observation streams (scene, wrist,
+    # proprio, prompt, soft_prompt, action_query) to flow through Gemma
+    # uniformly, removing the proprio shortcut that allowed v33 to bypass
+    # the LLM entirely (which produced 94% on LIBERO single-domain but
+    # blocked cross-embodiment learning since LLM never had to encode state).
+    # Forces ``include_proprio_placeholder=True`` (the slot must exist in the
+    # input layout for the scatter target).
+    proprio_in_llm: bool = False
 
     def __post_init__(self) -> None:
         # Backwards-compat: legacy ``freeze_llm_and_aq=True`` activates both
@@ -277,6 +316,30 @@ class VLAPolicyConfig:
             raise ValueError(
                 "wrist_in_llm=True is incompatible with use_scene_wrist_dinov2_llm=True; "
                 "use one or the other for wrist→LLM injection."
+            )
+        if self.proper_ffn_mode not in ("legacy", "linear_only", "proper_mlp"):
+            raise ValueError(
+                "proper_ffn_mode must be 'legacy' / 'linear_only' / 'proper_mlp'; "
+                "got {!r}".format(self.proper_ffn_mode)
+            )
+        if self.proper_ffn_mode != "legacy" and not self.use_proper_residual:
+            raise ValueError(
+                "proper_ffn_mode={!r} only makes sense with use_proper_residual=True; "
+                "the legacy non-residual path always uses LN→Linear→ReLU".format(self.proper_ffn_mode)
+            )
+        if self.layer_scale_init < 0.0:
+            raise ValueError(
+                "layer_scale_init must be >= 0; got {}".format(self.layer_scale_init)
+            )
+        if self.layer_scale_init > 0.0 and not self.use_proper_residual:
+            raise ValueError(
+                "layer_scale_init > 0 requires use_proper_residual=True (the legacy "
+                "path doesn't apply a residual branch to scale)."
+            )
+        if self.proprio_in_llm and not self.include_proprio_placeholder:
+            raise ValueError(
+                "proprio_in_llm=True requires include_proprio_placeholder=True; "
+                "the LLM input layout must reserve a slot for the scatter target."
             )
         if not 0.0 <= self.wrist_view_dropout_p <= 1.0:
             raise ValueError(
@@ -550,6 +613,10 @@ class VLAPolicy(nn.Module):
             gating_init=cfg.gating_init,
             gating_init_wrist=cfg.gating_init_wrist,
             ungated_streams=cfg.ungated_streams,
+            use_proper_residual=cfg.use_proper_residual,
+            proper_ffn_mode=cfg.proper_ffn_mode,
+            layer_scale_init=cfg.layer_scale_init,
+            mlp_ratio=cfg.mlp_ratio,
             output_action_dim=cfg.action_head_outputs_actions,
         )
 
@@ -703,6 +770,16 @@ class VLAPolicy(nn.Module):
         # LLM hidden state is unused, soft / wrist are not in the LLM input.
         emb = scatter_into_embeds(raw_e, packed.idx["scene"], scene_e.to(llm_dtype))
         emb = scatter_into_embeds(emb, packed.idx["action"], action_q_e.to(llm_dtype))
+        # v41: when proprio_in_llm=True, scatter proprio_proj output into the
+        # reserved PROPRIO_PLACEHOLDER slot. The action_head will then receive
+        # ``p=None`` (see step 8 below) so the adapter bank inside each block
+        # is just ``h_a`` — LLM hidden states must encode proprio for action
+        # prediction. Builds proprio_e here (before LLM forward) instead of
+        # the legacy step-8 location to keep the scatter targets co-located.
+        proprio_e = None
+        if self.cfg.proprio_in_llm and "proprio" in packed.idx:
+            proprio_e = self.proprio_proj(batch["proprio"], domain_id).unsqueeze(1)
+            emb = scatter_into_embeds(emb, packed.idx["proprio"], proprio_e.to(llm_dtype))
         # v33: when soft_prompt_in_llm=True, scatter the soft prompt embeddings
         # into the LLM input at the reserved soft_prompt placeholder block.
         # The soft prompt is no longer concatenated into the action_head's
@@ -814,8 +891,18 @@ class VLAPolicy(nn.Module):
         if self.training:
             x_init = x_init + 0.02 * torch.randn_like(x_init)
 
-        # 8. proprio -> p (matches policy dtype).
-        p = self.proprio_proj(batch["proprio"], domain_id).unsqueeze(1)
+        # 8. proprio -> p (matches policy dtype). When proprio_in_llm=True,
+        # proprio was already scattered into the LLM input embedding (step 5)
+        # and the action_head's adapter bank should NOT receive it directly
+        # (otherwise the model has both routes and the shortcut is preserved).
+        # Reuse the proprio_e computed above when available; otherwise build
+        # the legacy ``p`` for the action_head direct path.
+        if self.cfg.proprio_in_llm:
+            p = None
+        elif proprio_e is not None:
+            p = proprio_e
+        else:
+            p = self.proprio_proj(batch["proprio"], domain_id).unsqueeze(1)
 
         # 9. action head (policy dtype throughout). h_w + h_sp join the
         # self-attn pool (concat to x post-fc1, trimmed back after blocks).
