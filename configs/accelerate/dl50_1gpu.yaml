@@ -1,0 +1,23 @@
+# Accelerate launch preset for dl50: 1x RTX 6000 Ada 49GB single-GPU.
+# Used for small-data FT (e.g. SO101) where multi-GPU DDP is overkill.
+# Pick a free GPU via CUDA_VISIBLE_DEVICES; bf16 retained for parity with
+# 4-GPU pretrain numerics.
+#
+# Launch:
+#   CUDA_VISIBLE_DEVICES=0 \
+#     accelerate launch --config_file configs/accelerate/dl50_1gpu.yaml \
+#       scripts/train.py configs/train/so101_v46_step30k_ft_dl50.yaml
+compute_environment: LOCAL_MACHINE
+distributed_type: 'NO'
+downcast_bf16: 'no'
+machine_rank: 0
+main_training_function: main
+mixed_precision: bf16
+num_machines: 1
+num_processes: 1
+rdzv_backend: static
+same_network: true
+tpu_env: []
+tpu_use_cluster: false
+tpu_use_sudo: false
+use_cpu: false

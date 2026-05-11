@@ -54,6 +54,28 @@ def _build_dataloader(cfg: DictConfig, prompt_max_len: int, language_model_name:
             ds, batch_size=cfg.train.batch_size,
             collate_fn=LeRobotLiberoDataset.collate_fn,
         )
+    if data_type == "so101_lerobot":
+        tok = GemmaPromptTokenizer(model_name=language_model_name, max_len=prompt_max_len)
+        from vla_project.data.datasets.lerobot_so101_dataset import LeRobotSO101Dataset
+        ds = LeRobotSO101Dataset(
+            root=cfg.data.root,
+            stats_path=cfg.data.stats_path,
+            unnorm_key=cfg.data.unnorm_key,
+            fps=cfg.data.fps,
+            tokenizer=tok,
+            action_chunk_len=int(cfg.data.get("action_chunk_len", 8)),
+            domain_id=int(cfg.data.get("domain_id", 0)),
+            max_samples=cfg.data.get("max_samples", None),
+            last_action_chunk_mode=str(cfg.data.get("last_action_chunk_mode", "zero")),
+            download_videos=bool(cfg.data.get("download_videos", False)),
+            include_scene_dinov2=include_scene_dinov2,
+            include_wrist_dinov2=include_wrist_dinov2,
+            repo_id=str(cfg.data.get("repo_id", "takaki99/test_so101")),
+        )
+        return DataLoader(
+            ds, batch_size=cfg.train.batch_size,
+            collate_fn=LeRobotSO101Dataset.collate_fn,
+        )
     if data_type == "libero_rlds":
         tok = GemmaPromptTokenizer(model_name=language_model_name, max_len=prompt_max_len)
         from vla_project.data.datasets.rlds_libero_dataset import RLDSLiberoDataset

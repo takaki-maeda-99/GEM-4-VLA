@@ -84,29 +84,113 @@ uv run python scripts/eval.py configs/eval/libero_v33_step10000.yaml
 Eval rolls out 50 episodes per suite; metrics + per-task results write to
 `outputs/<run>/eval/`. MP4 videos are optional (`save_video: true`).
 
-## Inference server (Phase 0)
+## Inference server
 
 FastAPI HTTP server hosting an X-VLA-Adapter checkpoint behind MimicRec's
-`POST /predict` contract. Phase 0 ships `HoldPositionChunkPredictor`
-end-to-end (no GPU / no ckpt required) — useful for wire-format smoke. The
-real-model `XVLAAdapterChunkPredictor` is a stub awaiting v36 ckpt training.
+`POST /predict` contract. Two predictor modes:
+
+- **`hold_position`** (Phase 0) — emits a constant action chunk. No GPU / no
+  ckpt required. Use for wire-format smoke testing.
+- **`xvla_adapter`** (Phase 1) — loads a real ckpt and runs forward
+  passes; returns the model's denormalized action chunk in NATIVE units.
+  Requires a checkpoint dir (`meta.json` + `model.pt`) + matching deploy
+  YAML.
+
+### HoldPosition smoke (no GPU)
 
 ```bash
-# HoldPosition mode (Phase 0; immediate)
 uv run python scripts/serve.py \
   --predictor hold_position \
   --deploy-config configs/deploy/v36_libero_spatial.yaml \
   --domain-id 0 \
   --port 8001
 
-# Verify
 curl http://127.0.0.1:8001/healthz
 # {"status":"ok","predictor":"HoldPositionChunkPredictor","ready_at_ns":...}
 ```
 
-For details (XVLAAdapter mode, deploy yaml authoring, ckpt swap, known
-limitations) see [`src/vla_project/deployment/README.md`](src/vla_project/deployment/README.md).
+### XVLAAdapter (real ckpt)
+
+The deploy YAML pins the ckpt's expected dims + describes the
+proprio/action adapter (raw client units → model units → MimicRec contract
+units). See [`configs/deploy/_template.yaml`](configs/deploy/_template.yaml)
+for the schema and [`configs/deploy/so101_v46.yaml`](configs/deploy/so101_v46.yaml)
+for a working SO101 example.
+
+```bash
+# Pick a free GPU; if another DDP job is on the same node also pass
+# --main_process_port to avoid 29500 collision (accelerate default).
+CUDA_VISIBLE_DEVICES=5 \
+  uv run python scripts/serve.py \
+    --predictor xvla_adapter \
+    --checkpoint outputs/so101_v46_step30k_ft_dl50/checkpoints/step_2000 \
+    --deploy-config configs/deploy/so101_v46.yaml \
+    --domain-id 9 \
+    --host 127.0.0.1 \
+    --port 8001
+
+curl http://127.0.0.1:8001/healthz
+# {"status":"ok","predictor":"XVLAAdapterChunkPredictor","ready_at_ns":...}
+
+# /predict body: PredictRequest schema = {image_primary, image_wrist (b64 JPEG),
+#   proprio (raw client units, per deploy yaml proprio.source), instruction}
+# Response: {"actions": list[list[float]]}  shape (T, A) in native units.
+```
+
+A minimal smoke client lives nowhere yet; the test harness in
+`tests/deployment/` exercises both predictor paths and is the easiest
+reference for building a request.
+
+Per-request latency on a single RTX 6000 Ada with bf16 + `torch_compile: off`
+is ~220 ms (budget 266 ms, logged as a warning if exceeded).
+
+Known limitations:
+
+- `XVLAAdapterChunkPredictor` currently feeds zeros for
+  `batch["last_action_chunk"]` — the model ignores that field
+  (`vla_policy.py:530-537`, `x_init=zeros` in the action head). Streaming
+  history persistence is therefore inert; revisit if a future arch
+  reinstates the LastAction projection.
+- The frame conversion adapter (`action.frame_conversion.method`) only
+  supports `none`; `world_to_ee_local` / `ee_local_to_world` are stubs.
+  Mark `wire_only_smoke: true` in the deploy YAML when the native frame
+  does not equal the contract frame (e.g. SO101 v46 native is dataset
+  "world" but a real SO101 MimicRec contract may want `ee_local`).
+
+For details (deploy yaml authoring, ckpt swap, known limitations) see
+[`src/vla_project/deployment/README.md`](src/vla_project/deployment/README.md).
 Design + plan live under [`docs/superpowers/`](docs/superpowers/).
+
+### SO101 fine-tuning + deploy walkthrough
+
+The full SO101 path (HF dataset → v2.1 conversion → norm stats → FT →
+serve) is automated by these tools:
+
+```bash
+# 1. Convert HF v3.0 → v2.1 layout consumable by lerobot 0.3.3,
+#    and drop episodes with success=False / deleted=True.
+uv run python tools/convert_so101_v3_to_v21.py \
+  --repo_id takaki99/test_so101 \
+  --out_root data/converted/takaki99_test_so101_v21
+
+# 2. Compute Q99 stats for EE-delta action (with SO(3) logmap for d_rotvec
+#    — plain subtraction wraps around at ±π) + EE-pose proprio.
+uv run python tools/compute_norm_stats_so101.py \
+  --converted_root data/converted/takaki99_test_so101_v21 \
+  --dataset_key so101_test \
+  --output data/norm_stats/so101_test.json
+
+# 3. FT from a pretrained ckpt (resume_da_row_init=random for the new
+#    domain — never copy_row_<n> for a fresh embodiment, see CLAUDE.md
+#    "DA Row Init for FT").
+CUDA_VISIBLE_DEVICES=4 \
+  uv run accelerate launch \
+    --config_file configs/accelerate/dl50_1gpu.yaml \
+    --main_process_port 29501 \
+    scripts/train.py configs/train/so101_v46_step30k_ft_dl50.yaml
+
+# 4. Serve the FT'd ckpt (see XVLAAdapter section above).
+```
 
 ## Configuration model
 
