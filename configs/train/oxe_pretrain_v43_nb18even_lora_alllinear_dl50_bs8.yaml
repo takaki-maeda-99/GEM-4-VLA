@@ -1,0 +1,170 @@
+# V41 OXE pretrain: proprio_in_llm + ungated_streams + LoRA q/k/v.
+#
+# Hypothesis (round 4-6 sensitivity diagnostics):
+#   - v33 succeeded at LIBERO 94% via the proprio direct-shortcut into the
+#     action_head (proprio_proj output → cat([h_a, p]) inside each block).
+#     proprio supplied 81% of action variance; LLM never had to learn
+#     state-aware representations.
+#   - v37 multi-domain pretrain: same architecture inherits the same
+#     shortcut, but the action_head collapsed (output near-constant for
+#     every input), action_query_hub norm 5.5× v33's. Cross-embodiment
+#     knowledge had no place to accumulate.
+#
+# Fix (round 5-6 Codex review): route proprio through Gemma so all
+# observation streams (scene, wrist, proprio, prompt, soft_prompt,
+# action_query) flow uniformly through the LLM. Action_head loses the
+# proprio shortcut and must extract state from LLM hidden states. This
+# forces Gemma to learn proprio-aware cross-embodiment representations.
+#
+# Diffs from configs/train/oxe_pretrain_v37_nb18even_dl50_bs8.yaml:
+#   - model.proprio_in_llm: false → TRUE
+#   - model.include_proprio_placeholder: required true (forced by
+#       __post_init__ when proprio_in_llm=true)
+#   - model.ungated_streams: false → TRUE
+#       Codex round 6: v33's gates ≈ 0 succeeded BECAUSE proprio shortcut
+#       carried the load. With proprio_in_llm=true the shortcut is gone;
+#       gating the task stream would re-create the v37 collapse
+#       conditions (scene/wrist throttled).
+#   - model.lora.target_modules: [q_proj, v_proj] → [q_proj, k_proj, v_proj]
+#       The new proprio token must be SELECTABLE by attention. q/v alone
+#       lets queries seek and values be picked, but k_proj LoRA lets the
+#       LLM learn how to make the new token selectable as a key.
+#   - train.{freeze_steps, warmup_steps, freeze_group_names, schedule_group_names, lr_coefs}:
+#       v37 freeze=5000/warmup=2500 → v39 freeze=0/warmup=1000 with all
+#       trainable groups scheduled. Freezing gemma_lora for the first 5k
+#       contradicts the experiment's premise (Gemma must learn to use
+#       the new proprio slot from step 0).
+#   - max_steps: 100000 → 35000 (match v37's known reference timing for
+#       direct apples-to-apples comparison; can extend to 100k if 35k
+#       trajectory looks good)
+#
+# Hardware: dl50 GPU 0-3 (NUMA0, 4× RTX 6000 Ada 49GB), DDP intra-NUMA PCIe.
+# bs=8 + compile=default + GC=off retained from v37.
+#
+# Monitoring (Codex round 6 watch list):
+#   - action_query_hub.queries norm (shortcut may move from `p` to action
+#     positions if Gemma fails to learn proprio routing)
+#   - vary-proprio sensitivity test on intermediate ckpts (step 5k, 10k...)
+#     — should approach v33's 0.81 ratio if proprio_in_llm works.
+#   - proprio_proj output per-domain norm (should stay healthy ~50)
+#   - h_a per-sample variance at action positions (precondition for
+#     action_head to extract proprio info)
+#
+# Launch:
+#   cd /misc/dl00/takaki/X-VLA-Adapter
+#   mkdir -p outputs/oxe_pretrain_v43_nb18even_lora_alllinear_dl50_bs8
+#   MALLOC_ARENA_MAX=2 MALLOC_TRIM_THRESHOLD_=0 \
+#   CUDA_VISIBLE_DEVICES=0,1,2,3 \
+#   nohup .venv/bin/accelerate launch \
+#     --config_file configs/accelerate/dl50_4gpu.yaml \
+#     scripts/train.py configs/train/oxe_pretrain_v43_nb18even_lora_alllinear_dl50_bs8.yaml \
+#     > outputs/oxe_pretrain_v43_nb18even_lora_alllinear_dl50_bs8/launch.log 2>&1 &
+seed: 0
+model:
+  num_domains: 9                           # 9 OXE only (LIBERO mix is v40 territory)
+  compat_profile: x_vla_adapter
+  hidden_dim: 1536
+  num_blocks: 18                           # 1-skip across 35 Gemma layers
+  action_head_layer_mode: even             # taps Gemma layers 1,3,5,...,35
+  use_grad_checkpoint: false               # mandatory off when compile=on
+  use_wrist_bridge: false
+  wrist_in_llm: true
+  wrist_view_dropout_p: 0.2
+  ungated_streams: true                    # Codex r6: proprio_in_llm needs unblocked task/wrist streams
+  use_soft_prompt: true
+  num_soft_prompt_tokens: 32
+  soft_prompt_in_llm: true
+  prompt_position: after_vision
+  include_proprio_placeholder: true        # required by proprio_in_llm
+  proprio_in_llm: true                     # ★ THE EXPERIMENT
+  prompt_max_len: 20
+  use_baseline_projectors: false
+  proj_arch: da_2layer
+  proj_hidden_dim: 1536
+  vision_placeholder_mode: unused_range
+  freeze_llm_and_aq: false
+  freeze_action_queries: false
+  wrap_llm_in_no_grad: false
+  lora:
+    r: 64
+    alpha: 128
+    target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]  # v43 ablation: all-linear (= upstream VLA-Adapter LoRA target)   # Codex r6: add k_proj for new token selectability
+    dropout: 0.0
+vision:
+  type: timm
+  model_name: google/siglip-so400m-patch14-224
+language:
+  model_name: google/gemma-4-E2B
+data:
+  type: oxe_rlds_multidomain
+  data_dir: /misc/dl00/takaki/vla-gemma-4/data/stage3_openx
+  action_chunk_len: 8
+  shuffle_buffer_size: 65536
+  train: true
+  seed: 42
+  sources:
+    - dataset_name: fractal20220817_data
+      domain_id: 0
+      weight: 1.0
+    - dataset_name: taco_play
+      domain_id: 1
+      weight: 1.0
+    - dataset_name: jaco_play
+      domain_id: 2
+      weight: 1.0
+    - dataset_name: viola
+      domain_id: 3
+      weight: 1.0
+    - dataset_name: berkeley_autolab_ur5
+      domain_id: 4
+      weight: 1.0
+    - dataset_name: stanford_hydra_dataset_converted_externally_to_rlds
+      domain_id: 5
+      weight: 1.0
+    - dataset_name: nyu_franka_play_dataset_converted_externally_to_rlds
+      domain_id: 6
+      weight: 1.0
+    - dataset_name: austin_sailor_dataset_converted_externally_to_rlds
+      domain_id: 7
+      weight: 1.0
+    - dataset_name: austin_sirius_dataset_converted_externally_to_rlds
+      domain_id: 8
+      weight: 1.0
+train:
+  batch_size: 8
+  optimizer_kind: adamw_8bit
+  lr: 2.0e-4
+  weight_decay: 0.01
+  max_steps: 35000                         # match v37 reference budget
+  freeze_steps: 5000                       # User direction (2026-05-10): keep v37-style LLM freeze for the first 5k. Even with proprio_in_llm, the head/projectors should stabilize before LLM LoRA starts learning the new proprio routing — otherwise gemma_lora updates push the LLM in directions the action_head can't yet exploit.
+  warmup_steps: 1000                       # post-freeze warmup ramp (gemma_lora 0 → full at step 6000; other groups warmup from step 0)
+  freeze_group_names: [gemma_lora]
+  schedule_group_names:
+    - gemma_lora
+    - soft_prompts
+    - action_queries
+    - scene_projection
+    - head_projections
+    - action_head
+  min_lr_ratio: 1.0
+  grad_clip_norm: 1.0
+  ddp_find_unused_parameters: false
+  compile_mode: default
+  lr_coefs:
+    gemma_lora:        0.1
+    siglip:            0.0
+    wrist_siglip:      0.0
+    soft_prompts:      0.1
+    action_queries:    1.0
+    scene_projection:  1.0
+    head_projections:  1.0
+    action_head:       1.0
+  save_every: 1000                         # frequent early ckpts so we can run sensitivity diagnostic at step 1k/2k/... — proprio_in_llm validation needs early-trajectory data, not just step 5k+
+  save_dir: outputs/oxe_pretrain_v43_nb18even_lora_alllinear_dl50_bs8/checkpoints
+  diagnostic_first_n_batches: 100
+  num_workers: 0
+wandb:
+  enabled: true
+  project: vla-project
+  name: oxe_pretrain_v43_nb18even_lora_alllinear_dl50_4gpu_bs8_warmup1k
+  tags: [oxe_pretrain, rlds, multidomain, da_2layer, soft_prompt_llm, wrist_in_llm, proprio_in_llm, ungated_streams, lora_alllinear, 9_domains, dl50, 4gpu, bs8, nb18, even, compile_default, gc_off, scratch, freeze5k, warmup1k]

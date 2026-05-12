@@ -37,6 +37,7 @@ class MLPResNetBlock_Pro(nn.Module):
         proper_ffn_mode: str = "legacy",
         layer_scale_init: float = 0.0,
         mlp_ratio: float = 1.0,
+        use_soft_prompt_cross_attn: bool = False,
     ) -> None:
         super().__init__()
         assert dim % num_heads == 0
@@ -142,6 +143,19 @@ class MLPResNetBlock_Pro(nn.Module):
             if not ungated_streams:
                 self.gating_factor_wrist = nn.Parameter(torch.tensor([float(gating_init_wrist)]))
 
+        # arch v3: independent soft_prompt cross-attn stream (AQ pattern).
+        # soft_prompt is scattered into the LLM input embedding at the
+        # soft_prompt slot, Gemma processes it through self-attention, then we
+        # slice the per-layer hidden at the soft_prompt position and feed it to
+        # this block's k_soft_prompt/v_soft_prompt. Mirrors how action_queries
+        # flow into h_a -> adapter cross-attn. Only allocated when
+        # ``use_soft_prompt_cross_attn=True`` so legacy ckpts (no
+        # k_soft_prompt/v_soft_prompt params) stay loadable with this flag off.
+        self.use_soft_prompt_cross_attn = use_soft_prompt_cross_attn
+        if use_soft_prompt_cross_attn:
+            self.k_soft_prompt = nn.Linear(dim, dim)
+            self.v_soft_prompt = nn.Linear(dim, dim)
+
     def forward(
         self,
         x: torch.Tensor,
@@ -149,6 +163,8 @@ class MLPResNetBlock_Pro(nn.Module):
         h_t: torch.Tensor,
         p: torch.Tensor = None,  # noqa: RUF013 — None when proprio_in_llm=True
         h_w_l: torch.Tensor = None,  # noqa: RUF013 — keep Optional via None default
+        h_sp_l: torch.Tensor = None,  # noqa: RUF013 — arch v3 soft_prompt per-layer hidden
+        h_t_mask: torch.Tensor = None,  # noqa: RUF013 — (B, K_t) bool mask for prompt pad
     ) -> torch.Tensor:
         if self.ungated_streams:
             ratio_g = 1.0
@@ -169,6 +185,8 @@ class MLPResNetBlock_Pro(nn.Module):
         K_t = h_task.shape[1]
         use_wrist = (h_w_l is not None) and self.use_wrist_bridge
         K_w = h_w_l.shape[1] if use_wrist else 0
+        use_soft_prompt_ca = (h_sp_l is not None) and self.use_soft_prompt_cross_attn
+        K_sp = h_sp_l.shape[1] if use_soft_prompt_ca else 0
 
         def _heads(t: torch.Tensor, L: int) -> torch.Tensor:
             return t.view(B, L, self.num_heads, self.head_dim).transpose(1, 2)
@@ -183,6 +201,9 @@ class MLPResNetBlock_Pro(nn.Module):
         if use_wrist:
             k_w = _heads(self.k_wrist(h_w_l), K_w)
             v_w = _heads(self.v_wrist(h_w_l), K_w)
+        if use_soft_prompt_ca:
+            k_sp = _heads(self.k_soft_prompt(h_sp_l), K_sp)
+            v_sp = _heads(self.v_soft_prompt(h_sp_l), K_sp)
 
         cos, sin = self.rope(seq_len=T, device=x.device, dtype=x.dtype)
         q, k_s = apply_rope(q, k_s, cos, sin)
@@ -193,6 +214,9 @@ class MLPResNetBlock_Pro(nn.Module):
         if use_wrist:
             cos_w, sin_w = self.rope(seq_len=K_w, device=x.device, dtype=x.dtype)
             _, k_w = apply_rope(k_w, k_w, cos_w, sin_w)
+        if use_soft_prompt_ca:
+            cos_sp, sin_sp = self.rope(seq_len=K_sp, device=x.device, dtype=x.dtype)
+            _, k_sp = apply_rope(k_sp, k_sp, cos_sp, sin_sp)
 
         scores_list = [
             torch.matmul(q, k_s.transpose(-2, -1)),
@@ -202,12 +226,28 @@ class MLPResNetBlock_Pro(nn.Module):
         if use_wrist:
             ratio_g_wrist = 1.0 if self.ungated_streams else torch.tanh(self.gating_factor_wrist)
             scores_list.append(torch.matmul(q, k_w.transpose(-2, -1)) * ratio_g_wrist)
+        if use_soft_prompt_ca:
+            # arch v3: soft_prompt cross-attn is ungated (AQ pattern).
+            scores_list.append(torch.matmul(q, k_sp.transpose(-2, -1)))
         scores = torch.cat(scores_list, dim=-1) / math.sqrt(self.head_dim)
+
+        # arch v3: mask pad positions in the task slice. Codex round 3 warned
+        # gating is applied to the task term BEFORE this concat (ratio_g
+        # multiplied above), so masked_fill here with -inf is safe — the slice
+        # at [T+K_a : T+K_a+K_t] already includes the gating factor.
+        if h_t_mask is not None:
+            K_total = scores.shape[-1]
+            full_mask = scores.new_ones(B, 1, 1, K_total, dtype=torch.bool)
+            full_mask[:, :, :, T + K_a : T + K_a + K_t] = h_t_mask[:, None, None, :]
+            scores = scores.masked_fill(~full_mask, -1e4)
+
         weights = torch.softmax(scores, dim=-1)
 
         v_list = [v_s, v_a, v_t]
         if use_wrist:
             v_list.append(v_w)
+        if use_soft_prompt_ca:
+            v_list.append(v_sp)
         v = torch.cat(v_list, dim=2)
         attn_out = torch.matmul(weights, v).transpose(1, 2).reshape(B, T, self.dim)
         attn_out = self.o_proj(attn_out)

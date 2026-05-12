@@ -232,6 +232,52 @@ def _build_dataloader(cfg: DictConfig, prompt_max_len: int, language_model_name:
             ds, batch_size=cfg.train.batch_size,
             collate_fn=LeRobotLiberoDataset.collate_fn,
         )
+    if data_type == "oxe_interleaved":
+        # Single-graph multi-domain RLDS loader (v40 redesign). Builds ONE
+        # tf.data graph for all sources via sample_from_datasets + a single
+        # shuffle buffer, cutting rank-0 host RAM from ~286 GB (per-source
+        # buffer × N) to ~30 GB. Per-sample domain_id is injected as a
+        # constant frame field BEFORE interleave.
+        tok = GemmaPromptTokenizer(model_name=language_model_name, max_len=prompt_max_len)
+        from vla_project.data.datasets.rlds_interleaved_dataset import RLDSInterleavedMultidomain
+        sources = list(cfg.data.sources)
+        if len(sources) == 0:
+            raise ValueError("oxe_interleaved: cfg.data.sources is empty")
+        names = [str(src.dataset_name) for src in sources]
+        if len(set(names)) != len(names):
+            raise ValueError(f"oxe_interleaved: duplicate dataset_name: {names!r}")
+        ids = [int(src.domain_id) for src in sources]
+        if any(i < 0 for i in ids):
+            raise ValueError(f"oxe_interleaved: domain_id must be >= 0; got {ids!r}")
+        if len(set(ids)) != len(ids):
+            raise ValueError(f"oxe_interleaved: duplicate domain_id in sources: {ids!r}")
+        nd = int(cfg.model.num_domains)
+        if max(ids) >= nd:
+            raise ValueError(
+                f"oxe_interleaved: max(domain_id)={max(ids)} >= "
+                f"cfg.model.num_domains={nd}; bump num_domains or fix sources"
+            )
+        ds = RLDSInterleavedMultidomain(
+            data_dir=cfg.data.data_dir,
+            sources=sources,
+            tokenizer=tok,
+            action_chunk_len=int(cfg.data.get("action_chunk_len", 8)),
+            shuffle_buffer_size=int(cfg.data.get("shuffle_buffer_size", 65536)),
+            train=bool(cfg.data.get("train", True)),
+            seed=int(cfg.data.get("seed", 42)),
+            traj_transform_threads=int(cfg.data.get("traj_transform_threads", 13)),
+            traj_read_threads=int(cfg.data.get("traj_read_threads", 13)),
+            frame_transform_threads=int(cfg.data.get("frame_transform_threads", 16)),
+            include_scene_dinov2=include_scene_dinov2,
+            include_wrist_dinov2=include_wrist_dinov2,
+        )
+        nw = int(cfg.train.get("num_workers", 0))
+        return DataLoader(
+            ds, batch_size=cfg.train.batch_size,
+            collate_fn=RLDSInterleavedMultidomain.collate_fn,
+            num_workers=nw,
+            persistent_workers=(nw > 0),
+        )
     raise ValueError(f"unknown cfg.data.type: {data_type!r}")
 
 
@@ -254,7 +300,7 @@ def _checkpoint_norm_stats(cfg: DictConfig):
       B5 + B11 from the v37 plan.
     """
     data = cfg.get("data", {})
-    if data.get("type") == "oxe_rlds_multidomain":
+    if data.get("type") in ("oxe_rlds_multidomain", "oxe_interleaved"):
         return _build_oxe_norm_manifest(cfg)
     stats_path = data.get("stats_path")
     unnorm_key = data.get("unnorm_key")
@@ -297,6 +343,25 @@ def _build_oxe_norm_manifest(cfg: DictConfig) -> Dict[str, Any]:
         # (fractal20220817_data, taco_play already populated this way).
         stats_path = data_dir / name / "dataset_statistics.json"
         if not stats_path.is_file():
+            # LIBERO suites symlinked into stage3_openx don't ship a
+            # friendly-format top-level stats file (only RLDS hash-suffixed
+            # files inside <suite>/1.0.0/). RLDS normalizes them at training
+            # time using those internal stats; the ckpt manifest just records
+            # the suite name + empty placeholder so by_domain stays 1:1 with
+            # cfg.model.num_domains. OXE sources, which DO ship the friendly
+            # file, still error if missing.
+            if name.startswith("libero_") or name.endswith("_no_noops"):
+                by_domain[str(domain_id)] = {
+                    "dataset_name": name,
+                    "stats_path": None,
+                    "stats_hash": None,
+                    "action": {},
+                    "proprio": {},
+                    "num_transitions": None,
+                }
+                weights_map[str(domain_id)] = float(src.weight)
+                names_map[str(domain_id)] = name
+                continue
             raise FileNotFoundError(
                 f"oxe_rlds_multidomain: per-domain stats missing for {name!r} at "
                 f"{stats_path}. Run tools/precompute_oxe_stats.py to populate, "
@@ -402,15 +467,29 @@ def main(cfg_path: str) -> None:
     # source ckpt (e.g. 9 → 10 to add LIBERO at row 9). See
     # vla_project.training.checkpoint.load_pretrain_with_da_row_expansion.
     resume_ckpt = cfg.train.get("resume_ckpt", None)
+    resume_full = bool(cfg.train.get("resume_full", False))
+    resume_initial_step = 0
     if resume_ckpt:
         from vla_project.training.checkpoint import load_pretrain_with_da_row_expansion
         init_strategy = str(cfg.train.get("resume_da_row_init", "copy_row_1"))
-        print(f"[train] resuming weights from {resume_ckpt} (strategy={init_strategy!r})")
+        print(f"[train] resuming weights from {resume_ckpt} (strategy={init_strategy!r}, full={resume_full})")
         load_pretrain_with_da_row_expansion(
             resume_ckpt, policy,
             new_num_domains=int(cfg.model.num_domains),
             init_strategy=init_strategy,
         )
+        if resume_full:
+            # resume_full continues training from the ckpt step. Read step
+            # counter from meta.json now (so the scheduler/freeze logic uses
+            # the correct global step); optimizer.pt is loaded AFTER
+            # build_optimizer below.
+            _meta_path = Path(resume_ckpt) / "meta.json"
+            if _meta_path.is_file():
+                _meta = json.loads(_meta_path.read_text())
+                resume_initial_step = int(_meta.get("step", 0))
+                print(f"[train] resume_full: continuing from step {resume_initial_step}")
+            else:
+                print(f"[train] resume_full: meta.json not found at {_meta_path}; starting from step 0")
 
     compile_mode = str(cfg.train.get("compile_mode", "off"))
     if compile_mode != "off":
@@ -443,6 +522,28 @@ def main(cfg_path: str) -> None:
         lr_coefs=lr_coefs,
         optimizer_kind=str(cfg.train.get("optimizer_kind", "adamw")),
     )
+    if resume_full and resume_ckpt:
+        # Load optimizer state from ckpt's optimizer.pt to keep Adam moments
+        # continuous across the resume boundary.
+        #
+        # CRITICAL: optim.load_state_dict() overwrites each param_group["lr"]
+        # with the value saved at ckpt time. If the ckpt was saved during a
+        # freeze/warmup phase, that saved lr is 0 or sub-peak, and the
+        # trainer's scheduler then captures it as the group's "initial lr"
+        # (used as the post-warmup peak), pinning the group at 0 / sub-peak
+        # for the rest of training. We snapshot the build_optimizer-derived
+        # lrs BEFORE load_state_dict and restore them after. Adam moments
+        # come from the saved state; only the lr (config-driven) needs
+        # restoration.
+        _opt_pt = Path(resume_ckpt) / "optimizer.pt"
+        if _opt_pt.is_file():
+            _intended_lrs = [g["lr"] for g in optim.param_groups]
+            optim.load_state_dict(torch.load(_opt_pt, map_location="cpu", weights_only=False))
+            for _g, _lr in zip(optim.param_groups, _intended_lrs):
+                _g["lr"] = _lr
+            print(f"[train] resume_full: loaded optimizer state from {_opt_pt}; restored intended lrs={_intended_lrs}")
+        else:
+            print(f"[train] resume_full: optimizer.pt not found at {_opt_pt}; Adam moments reset")
     # ``schedule_group_names`` / ``freeze_group_names`` default to
     # TrainerConfig's class defaults when not specified, but allow yaml
     # override so configs like v28 can extend warmup to action_queries /
@@ -474,6 +575,7 @@ def main(cfg_path: str) -> None:
             "model_name": cfg.language.model_name,
             "prompt_max_len": policy_cfg.prompt_max_len,
         },
+        initial_step=resume_initial_step,
     )
     print(f"[train] losses={losses}")
 

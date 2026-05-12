@@ -1,0 +1,149 @@
+# V42 OXE pretrain: proper residual action_head + even layer tap + proprio_in_llm.
+#
+# Diagnostic from rounds 4-7 (v41 results):
+#   - v41 reached sensitivity 30%/proprio 21% at step_22k (real learning, not
+#     a pure shortcut), but per-block update_ratio across ALL of v33/v37/v41
+#     shows ~10000× spread between shallow (1e-4) and deepest blocks (~1.0).
+#   - Architectural root cause: MLPResNetBlock_Pro returns
+#     ``self.ffn(attn_out + x)`` — output OVERWRITES x. No residual stream
+#     means shallow block contributions can't accumulate; only the deepest
+#     block reliably reaches the output. VLA-Adapter upstream has the same
+#     bug; X-VLA upstream uses proper Pre-LN ``x = x + ffn(LN(...))``.
+#   - Codex r7 also flagged that `action_head_layer_mode=even` (taps Gemma
+#     layer 35 as deepest) gives the optimizer a worse high-depth attractor
+#     than v33's `even` cap at layer 24.
+#
+# v42 changes (from v41):
+#   - model.use_proper_residual: false → TRUE
+#       MLPResNetBlock_Pro.forward returns ``x + ffn(attn_out + x)`` instead
+#       of ``ffn(attn_out + x)``. Each block adds to (rather than replaces)
+#       the residual stream, so shallow blocks contribute to the output.
+#       Taps Gemma layers 1..24 (matches v33's regime — the only known
+#       success on this stack). Drops the deepest 11 LLM layers (25-35)
+#       that v37/v41 collapsed onto.
+#   - everything else inherited from v41 (proprio_in_llm=true, ungated=true,
+#     LoRA q/k/v, freeze_steps=5000 per user direction, warmup=1000)
+#
+# Hardware: dl50 GPU 0-3 (NUMA0, 4× RTX 6000 Ada 49GB), DDP intra-NUMA PCIe.
+# Concurrent with v41 attempt3 on the same GPUs — v41 must be killed before
+# launching v42, OR launch v42 on GPU 4-7 once v41 completes.
+#
+# Launch (after killing v41):
+#   cd /misc/dl00/takaki/X-VLA-Adapter
+#   mkdir -p outputs/oxe_pretrain_v42_nb18even_proper_residual_dl50_bs8
+#   MALLOC_ARENA_MAX=2 MALLOC_TRIM_THRESHOLD_=0 \
+#   CUDA_VISIBLE_DEVICES=0,1,2,3 \
+#   nohup .venv/bin/accelerate launch \
+#     --config_file configs/accelerate/dl50_4gpu.yaml \
+#     scripts/train.py configs/train/oxe_pretrain_v42_nb18even_proper_residual_dl50_bs8.yaml \
+#     > outputs/oxe_pretrain_v42_nb18even_proper_residual_dl50_bs8/launch.log 2>&1 &
+seed: 0
+model:
+  num_domains: 9                           # 9 OXE only
+  compat_profile: x_vla_adapter
+  hidden_dim: 1536
+  num_blocks: 18                           # match v41 for clean A/B comparison; differ from v41 ONLY in use_proper_residual=True (clean A/B; layer_mode=even unchanged)
+  action_head_layer_mode: even          # taps Gemma layers 1,3,5,...,35 (same as v41 for clean A/B)
+  use_grad_checkpoint: false
+  use_wrist_bridge: false
+  wrist_in_llm: true
+  wrist_view_dropout_p: 0.2
+  ungated_streams: true                    # carry forward from v41
+  use_proper_residual: true                # ★ THE ARCH FIX
+  use_soft_prompt: true
+  num_soft_prompt_tokens: 32
+  soft_prompt_in_llm: true
+  prompt_position: after_vision
+  include_proprio_placeholder: true
+  proprio_in_llm: true                     # carry forward from v41
+  prompt_max_len: 20
+  use_baseline_projectors: false
+  proj_arch: da_2layer
+  proj_hidden_dim: 1536
+  vision_placeholder_mode: unused_range
+  freeze_llm_and_aq: false
+  freeze_action_queries: false
+  wrap_llm_in_no_grad: false
+  lora:
+    r: 64
+    alpha: 128
+    target_modules: [q_proj, k_proj, v_proj]
+    dropout: 0.0
+vision:
+  type: timm
+  model_name: google/siglip-so400m-patch14-224
+language:
+  model_name: google/gemma-4-E2B
+data:
+  type: oxe_rlds_multidomain
+  data_dir: /misc/dl00/takaki/vla-gemma-4/data/stage3_openx
+  action_chunk_len: 8
+  shuffle_buffer_size: 65536
+  train: true
+  seed: 42
+  sources:
+    - dataset_name: fractal20220817_data
+      domain_id: 0
+      weight: 1.0
+    - dataset_name: taco_play
+      domain_id: 1
+      weight: 1.0
+    - dataset_name: jaco_play
+      domain_id: 2
+      weight: 1.0
+    - dataset_name: viola
+      domain_id: 3
+      weight: 1.0
+    - dataset_name: berkeley_autolab_ur5
+      domain_id: 4
+      weight: 1.0
+    - dataset_name: stanford_hydra_dataset_converted_externally_to_rlds
+      domain_id: 5
+      weight: 1.0
+    - dataset_name: nyu_franka_play_dataset_converted_externally_to_rlds
+      domain_id: 6
+      weight: 1.0
+    - dataset_name: austin_sailor_dataset_converted_externally_to_rlds
+      domain_id: 7
+      weight: 1.0
+    - dataset_name: austin_sirius_dataset_converted_externally_to_rlds
+      domain_id: 8
+      weight: 1.0
+train:
+  batch_size: 8
+  optimizer_kind: adamw_8bit
+  lr: 2.0e-4
+  weight_decay: 0.01
+  max_steps: 35000
+  freeze_steps: 5000                       # user direction: pretrain でも LLM 序盤 freeze
+  warmup_steps: 1000
+  freeze_group_names: [gemma_lora]
+  schedule_group_names:
+    - gemma_lora
+    - soft_prompts
+    - action_queries
+    - scene_projection
+    - head_projections
+    - action_head
+  min_lr_ratio: 1.0
+  grad_clip_norm: 1.0
+  ddp_find_unused_parameters: false
+  compile_mode: default
+  lr_coefs:
+    gemma_lora:        0.1
+    siglip:            0.0
+    wrist_siglip:      0.0
+    soft_prompts:      0.1
+    action_queries:    1.0
+    scene_projection:  1.0
+    head_projections:  1.0
+    action_head:       1.0
+  save_every: 1000                         # keep frequent ckpts for the same diagnostic cadence as v41
+  save_dir: outputs/oxe_pretrain_v42_nb18even_proper_residual_dl50_bs8/checkpoints
+  diagnostic_even_batches: 100
+  num_workers: 0
+wandb:
+  enabled: true
+  project: vla-project
+  name: oxe_pretrain_v42_nb18even_proper_residual_dl50_4gpu_bs8
+  tags: [oxe_pretrain, rlds, multidomain, da_2layer, soft_prompt_llm, wrist_in_llm, proprio_in_llm, ungated_streams, use_proper_residual, lora_qkv, 9_domains, dl50, 4gpu, bs8, nb18, even, compile_default, gc_off, scratch, freeze5k_warmup1k]

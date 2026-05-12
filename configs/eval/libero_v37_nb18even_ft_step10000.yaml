@@ -1,0 +1,68 @@
+# Eval v37 nb18even FT step_10000 (LIBERO Spatial).
+#
+# Loads outputs/libero_spatial_v37_nb18even_ft/checkpoints/step_10000 with
+# num_domains=10 (OXE rows 0-8 + LIBERO row 9). domain_id=9 selects the
+# LIBERO row at inference. Architecture matches the v37 nb18even bs=8
+# pretrain (num_blocks=18 + action_head_layer_mode=even).
+#
+# Run on dl42 (4× A6000 50GB; /misc/dl00 NFS-mounted, venv reusable):
+#   cd /misc/dl00/takaki/X-VLA-Adapter
+#   CUDA_VISIBLE_DEVICES=0 \
+#     PYTHONPATH=/misc/dl00/takaki/X-VLA-Adapter/src \
+#     .venv/bin/python scripts/eval.py \
+#     configs/eval/libero_v37_nb18even_ft_step10000.yaml \
+#     2>&1 | tee outputs/libero_spatial_v37_nb18even_ft/eval_step10000.log
+seed: 7
+checkpoint:
+  path: outputs/libero_spatial_v37_nb18even_ft/checkpoints/step_10000
+  strict: true
+model:
+  num_domains: 10                           # 9 OXE + 1 LIBERO row
+  compat_profile: x_vla_adapter
+  hidden_dim: 1536
+  num_blocks: 18                            # matches FT/pretrain
+  action_head_layer_mode: even              # taps Gemma layers 1,3,5,...,35
+  use_grad_checkpoint: false                # eval, no backward
+  use_wrist_bridge: false
+  wrist_in_llm: true
+  wrist_view_dropout_p: 0.0                 # eval has wrist always
+  ungated_streams: false
+  use_soft_prompt: true
+  num_soft_prompt_tokens: 32
+  soft_prompt_in_llm: true
+  prompt_position: after_vision
+  include_proprio_placeholder: false
+  prompt_max_len: 20
+  use_baseline_projectors: false
+  proj_arch: da_2layer
+  proj_hidden_dim: 1536
+  vision_placeholder_mode: unused_range
+  freeze_llm_and_aq: false
+  freeze_action_queries: false
+  wrap_llm_in_no_grad: false
+  lora:
+    r: 64
+    alpha: 128
+    target_modules: [q_proj, v_proj]
+    dropout: 0.0
+vision:
+  type: timm
+  model_name: google/siglip-so400m-patch14-224
+language: {model_name: google/gemma-4-E2B}
+data:
+  unnorm_key: libero_spatial_no_noops
+  stats_path: /misc/dl00/takaki/vla-gemma-4/VLA-Adapter/outputs/LIBERO-Spatial-Pro/dataset_statistics.json
+robot:
+  bddl_path_root: /misc/dl00/takaki/vla-gemma-4/LIBERO/libero/libero/bddl_files
+  task_suite: libero_spatial
+  image_size: 256
+  libero_path: ${oc.env:LIBERO_PATH,/misc/dl00/takaki/vla-gemma-4/LIBERO}
+eval:
+  domain_id: 9                              # LIBERO row 9 in DA-MLP
+  task_idxs: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+  num_episodes_per_task: 5
+  max_steps: 210
+  num_steps_wait: 10
+  video_dir: outputs/libero_spatial_v37_nb18even_ft/eval_videos_step10000
+  video_ext: mp4
+  video_fps: 10

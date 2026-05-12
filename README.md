@@ -15,18 +15,32 @@ LIBERO benchmarks and (eventually) real-robot deployment.
 | v31     | SigLIP + DINOv2 scene + wrist-into-LLM (no LoRA)           | 10000     | 36 %    | 36 % |
 | v32     | v31 + LoRA + AQ trainable (max_steps=20000)                | 17500     | 76 %    | 72 % |
 | **v33** | **DA-2-MLP + soft-prompt-in-LLM + LoRA r=64 (40000 steps)**| **40000** | **94 %**| 24 % |
+| v37     | OXE 9-dom pretrain → LIBERO DA-row FT (proprio shortcut)   | 15000     | ~80 %   | —    |
+| v44     | v41 + proper_residual + proper_mlp + LayerScale + LoRA all-linear | 10000 | 8 %     | 8 %  |
+| v45     | v44 arch + LIBERO 4 suite混合 pretrain (13 dom)            | 10000     | **20 %**| 20 % |
 
 v33 trajectory: 5k → 16% / 10k → 24% / 15k → 66% / 20k → 74% / 25k → 62% /
 30k → 80% / 35k → 84% / **40k → 94 %** (47/50). Soft prompts + DA-MLP + bigger
 LoRA need long training to ramp; pre-20k SR is misleading.
 
+Note: v33→v37 で proprio shortcut (proprio_proj → action_head 直結) を撤去し
+`proprio_in_llm=True` で cross-embodiment 学習に切替。v44/v45 系で SR が下がっ
+たのは proprio shortcut の代替経路がまだ機能していないため (occlusion test で
+no_lang / no_softprompt / swap_lang はいずれも noise floor 内、言語と
+soft_prompt は dead path)。
+
 In flight (no eval yet):
 
-- **v34 / v35** — 4-suite multi-domain RLDS (v35 = shared Q99 stats fix).
-  v34 step_40000 spatial = 2 % so far → multi-domain still under-trained or
-  needs different schedule.
-- **v36** — v33 base + π₀-style wrist-into-LLM (fixed 256-tok slot + mask +
-  view-dropout 0.3); wrist_bridge path dropped. Currently training on dl40 GPU 4.
+- **v47 arch v3** — v45 base + 「LLM-scattered token は全て slice して
+  action_head の cross-attn に流す」設計に統一。self-attn pool は x のみ、
+  h_t = scene+wrist+proprio+prompt(pad masked)、soft_prompt は独立 cross-attn
+  stream (k_soft_prompt / v_soft_prompt per block、AQ パターン)。`p` (legacy
+  proprio adapter concat) と legacy `h_w/h_sp` self-attn pool concat は廃止。
+  Fresh pretrain on OXE 9 + LIBERO 4 suite mix (13 domains), 35k steps. dl50
+  GPU 4-7, wandb run `02v3n1mx`.
+- **v45 LIBERO FT** — v45 step_35000 → LIBERO Spatial FT (domain_id=12,
+  existing row, num_domains=13 no expansion). 10k step で 20%。詳細
+  occlusion test で言語と soft_prompt が両方 dead と判明、arch v3 の根拠。
 
 ## Setup
 
