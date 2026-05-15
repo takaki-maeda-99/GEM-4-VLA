@@ -104,9 +104,9 @@ class ModelRuntime:
         cfg: Dict[str, Any],
         norm_stats: Dict[str, Any],
         ckpt_dir: Path,
-        model: VLAPolicy,
-        tokenizer: GemmaPromptTokenizer,
-        image_transform: SiglipImageTransform,
+        model: VLAPolicy | None,
+        tokenizer: GemmaPromptTokenizer | None,
+        image_transform: SiglipImageTransform | None,
         device: torch.device,
         dtype: torch.dtype,
         is_local: bool,
@@ -215,6 +215,48 @@ class ModelRuntime:
             runtime._warmup_forward()
 
         return runtime
+
+    @classmethod
+    def from_meta_only(
+        cls,
+        ckpt_dir: str | Path,
+        *,
+        trust_checkpoint_code: bool = False,
+    ) -> "ModelRuntime":
+        """Lightweight load for predictors that don't need the actual model (e.g., HoldPosition smoke).
+
+        Sets model=None; do not use with XVLAAdapter. Loads meta.json and
+        post_process.py only — no model weights, no tokenizer, no image_transform.
+        """
+        ckpt_dir, is_local = _resolve_ckpt_dir(ckpt_dir)
+        meta_path = ckpt_dir / "meta.json"
+        if not meta_path.is_file():
+            raise MetaJsonError(f"missing meta.json under {ckpt_dir}")
+        meta = json.loads(meta_path.read_text())
+        for required_key in ("step", "cfg", "norm_stats"):
+            if required_key not in meta:
+                raise MetaJsonError(f"meta.json missing required key {required_key!r}")
+
+        post_process_fn = load_post_process(
+            ckpt_dir, is_local=is_local, trust_checkpoint_code=trust_checkpoint_code,
+        )
+        post_process_path = str(ckpt_dir / "post_process.py") if post_process_fn is not None else None
+
+        return cls(
+            step=int(meta["step"]),
+            cfg=meta["cfg"],
+            norm_stats=meta["norm_stats"],
+            ckpt_dir=ckpt_dir,
+            model=None,
+            tokenizer=None,
+            image_transform=None,
+            device=torch.device("cpu"),
+            dtype=torch.float32,
+            is_local=is_local,
+            post_process_fn=post_process_fn,
+            post_process_path=post_process_path,
+            meta_raw=meta,
+        )
 
     def _warmup_forward(self) -> None:
         # action_chunk_len lives under cfg.data in the project's train YAMLs
