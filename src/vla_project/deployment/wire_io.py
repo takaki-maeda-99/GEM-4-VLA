@@ -14,9 +14,12 @@ from __future__ import annotations
 
 import base64
 import io
+import logging
 
 import numpy as np
 from PIL import Image
+
+logger = logging.getLogger("vla_project.deployment.wire_io")
 
 
 def q99_denorm_with_mask(action_norm: np.ndarray, stats: dict) -> np.ndarray:
@@ -67,3 +70,57 @@ def decode_jpeg_b64(b64: str) -> np.ndarray:
         )
     img = img.convert("RGB")
     return np.asarray(img, dtype=np.uint8)
+
+
+# F3 proprio OOD thresholds. Computed against normalized values
+# (after q01/q99 mapping). Values that exceed PROPRIO_OOD_WARN_ABS but
+# stay under HARD are clipped + warned. Values above HARD raise.
+# Calibration: 10x the q-range catches deg/rad swap; 1x is the soft
+# OOD warning for legitimate startup poses.
+PROPRIO_OOD_WARN_ABS: float = 1.0
+PROPRIO_OOD_HARD_ABS: float = 10.0
+
+
+def normalize_proprio_q99(
+    proprio_raw: np.ndarray, stats: dict
+) -> tuple[np.ndarray, bool]:
+    """Normalize raw proprio via q99 to [~ -1, +1] with passthrough on mask=False.
+
+    Returns (normalized, warned). `warned` is True if any masked dim's
+    |normed| exceeded PROPRIO_OOD_WARN_ABS (and was clipped). Raises
+    ValueError if any value is non-finite or any masked dim's |normed|
+    exceeds PROPRIO_OOD_HARD_ABS.
+    """
+    if not np.isfinite(proprio_raw).all():
+        bad_dims = np.where(~np.isfinite(proprio_raw))[0].tolist()
+        raise ValueError(f"proprio contains non-finite values at dims {bad_dims}")
+    q01 = np.asarray(stats["q01"], dtype=np.float32)
+    q99 = np.asarray(stats["q99"], dtype=np.float32)
+    mask = np.asarray(stats["mask"], dtype=bool)
+    span = q99 - q01
+    # F3-aware normalize: protect from div-by-zero on degenerate masked dims.
+    safe_span = np.where(span > 0, span, 1.0)
+    normed = 2.0 * (proprio_raw - q01) / safe_span - 1.0
+    # Passthrough on mask=False dims (gripper passthrough at training time).
+    normed = np.where(mask, normed, proprio_raw)
+    abs_normed = np.abs(normed)
+    hard_viol = (abs_normed > PROPRIO_OOD_HARD_ABS) & mask
+    if hard_viol.any():
+        bad = np.where(hard_viol)[0].tolist()
+        raise ValueError(
+            f"proprio normalized |x|>{PROPRIO_OOD_HARD_ABS} (hard) at dims {bad}; "
+            f"likely deg/rad swap or wrong proprio dim"
+        )
+    warn_viol = (abs_normed > PROPRIO_OOD_WARN_ABS) & mask
+    warned = bool(warn_viol.any())
+    if warned:
+        bad = np.where(warn_viol)[0].tolist()
+        logger.warning(
+            f"proprio normalized |x|>{PROPRIO_OOD_WARN_ABS} (warn) at dims {bad}; clipping"
+        )
+        normed = np.where(
+            mask,
+            np.clip(normed, -PROPRIO_OOD_WARN_ABS, PROPRIO_OOD_WARN_ABS),
+            normed,
+        )
+    return normed.astype(np.float32), warned
