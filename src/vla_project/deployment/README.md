@@ -21,7 +21,6 @@ Hosts an X-VLA-Adapter checkpoint behind MimicRec's `POST /predict` contract.
 ```bash
 uv run python scripts/serve.py \
   --predictor hold_position \
-  --deploy-config configs/deploy/v36_libero_spatial.yaml \
   --domain-id 0 \
   --port 8001
 ```
@@ -44,7 +43,6 @@ because `XVLAAdapterChunkPredictor.predict()` is stubbed for Phase 1.
 uv run python scripts/serve.py \
   --predictor xvla_adapter \
   --checkpoint ~/X-VLA-Adapter_export/v33_step40000 \
-  --deploy-config configs/deploy/v36_libero_spatial.yaml \
   --domain-id 0 \
   --port 8001
 # /healthz → ok; /predict → 500 NotImplementedError
@@ -62,16 +60,11 @@ There is no reload endpoint. Kill the process and restart with the new
 
 ---
 
-## Adding a new robot deploy yaml
+## Adding a new robot deployment
 
-1. Copy `configs/deploy/_template.yaml` to `configs/deploy/<robot>_<model>.yaml`.
-2. Fill in the four `ckpt.expected_*` fields from the ckpt's `meta.json` cfg.
-3. Set `request_fields` to the canonical wire names (`image_primary`, `image_wrist`, `proprio`, `instruction`). The MimicRec contract YAML on the client side **must** use these canonical names in Phase 0; pydantic alias remap for arbitrary contract names is Phase 1 work.
-4. Set `proprio.{source, adapt}` to match the robot's raw proprio layout (see template comments).
-5. Set `action.{native, contract}` per the ckpt's training output convention and the MimicRec contract's response convention. If `native.frame != contract.frame` and you have not implemented `frame_conversion`, set `wire_only_smoke: true` to bypass the startup assertion (motion will not be physically correct).
-6. (Optional) Adjust `holdposition.gripper_native_midpoint` if the native gripper convention is not `normalized_0_1`.
+Robot-specific config (proprio source/adapt, action frame/gripper convention) is no longer loaded from YAML files. Instead, it is baked into the checkpoint's `meta.json` during training and passed directly to the runtime via CLI arguments or environment variables.
 
-Then start the server pointing at the new yaml.
+See `scripts/serve.py --help` and the spec `docs/superpowers/specs/2026-05-06-vla-inference-server-design.md` for details on providing robot-specific metadata at deployment time.
 
 ---
 
@@ -87,44 +80,22 @@ Then start the server pointing at the new yaml.
 
 ## Phase 0 acceptance verification
 
-Run the named test files:
+Run the core yamlless test suite:
 
 ```bash
 PYTHONPATH= uv run pytest \
-  tests/test_deployment_schemas.py \
-  tests/test_domain_adapter.py \
-  tests/test_predictor_base.py \
-  tests/test_predictor_holdposition.py \
-  tests/test_predictor_xvla_adapter.py \
+  tests/test_wire_io_denorm.py \
+  tests/test_wire_io_jpeg.py \
+  tests/test_wire_io_proprio_ood.py \
+  tests/test_post_process_loader.py \
+  tests/test_startup_validation.py \
+  tests/test_metadata_response.py \
+  tests/test_runtime_post_process.py \
   tests/test_runtime_load.py \
-  tests/test_inference_server_minimal.py \
-  tests/test_serve_smoke.py \
-  tests/test_validation_image_sanity.py \
-  tests/test_validation_prompt.py \
-  tests/test_validation_proprio.py \
-  tests/test_validation_typo.py \
-  tests/test_admin_schema.py \
-  -q
+  tests/test_inference_server_yamlless.py \
+  tests/test_checkpoint_native_action.py \
+  tests/test_backfill_native_action.py \
+  -v
 ```
 
-For the MimicRec integration smoke (Phase 0 acceptance gate item 3):
-
-```bash
-# Terminal 1: start the server
-uv run python scripts/serve.py \
-  --predictor hold_position \
-  --deploy-config configs/deploy/v36_libero_spatial.yaml \
-  --domain-id 0 --port 8001
-
-# Terminal 2: copy the pairing example into MimicRec's contract dir, then run smoke
-cp configs/deploy/mimicrec_pairing_example.yaml \
-   /home/takakimaeda/MimicRec/configs/inference/x_vla_v36_smoke.yaml
-cd /home/takakimaeda/MimicRec
-.venv/bin/python scripts/smoke_inference_real_data.py
-```
-
-Expected output:
-```
-✅ inference mock pipeline works end-to-end with real data
-IK failures: 0/N    # zero ee_delta → no IK displacement
-```
+Expected: 50 passed.

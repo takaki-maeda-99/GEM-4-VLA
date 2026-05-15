@@ -125,7 +125,7 @@ caches under `~/.cache/huggingface/hub/`; subsequent loads are free.
 ```bash
 # Load directly from Hugging Face Hub (preferred for deploy: reproducible,
 # no local-state coupling).
-CUDA_VISIBLE_DEVICES=5 \
+CUDA_VISIBLE_DEVICES=0 \
   uv run python scripts/serve.py \
     --predictor xvla_adapter \
     --checkpoint takaki99/so101-v46/step_2000 \
@@ -135,7 +135,7 @@ CUDA_VISIBLE_DEVICES=5 \
     --port 8001
 
 # Or use a local checkpoint directory (faster for in-development iteration).
-CUDA_VISIBLE_DEVICES=5 \
+CUDA_VISIBLE_DEVICES=0 \
   uv run python scripts/serve.py \
     --predictor xvla_adapter \
     --checkpoint outputs/so101_v46_step30k_ft_dl50/checkpoints/step_2000 \

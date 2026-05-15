@@ -1,11 +1,9 @@
 """XVLAAdapterChunkPredictor — Phase 1 implementation.
 
-Takes an obs dict produced by ``DomainAdapter.preprocess`` and returns a
-single chunk in MODEL NATIVE physical units (i.e. after Q99 denormalize
-but BEFORE DomainAdapter.postprocess applies contract gripper / frame
-conversion).
+Takes an obs dict with JPEG-decoded images, normalized proprio, and language
+instruction, and returns a single chunk in MODEL NATIVE physical units.
 
-obs schema (after DomainAdapter.preprocess):
+obs schema:
   - scene_image: np.uint8 [H, W, 3]    (decoded from JPEG)
   - wrist_image: np.uint8 [H, W, 3]
   - wrist_was_provided: bool
@@ -14,7 +12,7 @@ obs schema (after DomainAdapter.preprocess):
 
 We delegate the model + tokenizer + image_transform to ModelRuntime
 (Phase 1) and build the batch ourselves; this keeps predictor-specific
-contract logic (no LIBERO gripper transform, etc.) out of ModelRuntime.
+logic out of ModelRuntime.
 """
 from __future__ import annotations
 

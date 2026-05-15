@@ -1,14 +1,13 @@
 """Wire I/O helpers for the deployment server.
 
-This module replaces the salvageable parts of the old DomainAdapter:
+Provides:
   - q99 denorm with mask (dim-wise q99-inverse on mask=True dims, passthrough on False)
-  - JPEG decode + image sanity bounds (Task 2)
-  - Proprio normalize + F3 OOD (Task 3)
-  - NaN guards (Task 8, called from inference_server)
+  - JPEG decode + image sanity bounds (F1 validation)
+  - Proprio normalize + F3 OOD (F3 validation)
+  - NaN guards (called from inference_server)
 
-The contract-translation parts of DomainAdapter (frame conversion,
-gripper convention, raw-proprio source/adapt) are NOT recreated here —
-those move to clients per the yaml-less spec.
+Robot-specific contract translation (frame conversion, gripper convention,
+raw-proprio source/adapt) is handled by clients per the yaml-less spec.
 """
 from __future__ import annotations
 
