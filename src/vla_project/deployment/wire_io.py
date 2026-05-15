@@ -50,8 +50,13 @@ def decode_jpeg_b64(b64: str) -> np.ndarray:
     on either axis.
     """
     raw = base64.b64decode(b64)
-    img = Image.open(io.BytesIO(raw)).convert("RGB")
-    h, w = img.height, img.width
+    # F1: header-parse-first. Image.open() reads only the JPEG header
+    # (no pixel decode); .size returns (W, H) from the header. We bound
+    # the dimensions before convert("RGB") forces full pixel decode,
+    # so an attacker / corrupt payload can't allocate gigabytes via
+    # an oversized header.
+    img = Image.open(io.BytesIO(raw))
+    w, h = img.size
     if h < IMAGE_MIN_SIDE or w < IMAGE_MIN_SIDE:
         raise ValueError(
             f"image side below IMAGE_MIN_SIDE={IMAGE_MIN_SIDE}: got h={h}, w={w}"
@@ -60,4 +65,5 @@ def decode_jpeg_b64(b64: str) -> np.ndarray:
         raise ValueError(
             f"image side above IMAGE_MAX_SIDE={IMAGE_MAX_SIDE}: got h={h}, w={w}"
         )
+    img = img.convert("RGB")
     return np.asarray(img, dtype=np.uint8)
