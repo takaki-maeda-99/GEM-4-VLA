@@ -1,19 +1,16 @@
-"""Entry point for the inference HTTP server.
+"""Entry point for the inference HTTP server (yaml-less).
 
-Run:
+Run with a Hugging Face checkpoint id:
   uv run python scripts/serve.py \\
-    --predictor hold_position \\
-    --deploy-config configs/deploy/v36_libero_spatial.yaml \\
-    --domain-id 0 \\
+    --checkpoint takaki99/GEM-4-FT-bottle \\
     --port 8001
 
-For xvla_adapter mode (Phase 1 — predict() returns 500 NotImplementedError today):
+Or a local checkpoint dir:
   uv run python scripts/serve.py \\
-    --predictor xvla_adapter \\
-    --checkpoint /path/to/v36_export \\
-    --deploy-config configs/deploy/v36_libero_spatial.yaml \\
-    --domain-id 0 \\
+    --checkpoint outputs/run/checkpoints/step_2000 \\
     --port 8001
+
+See docs/superpowers/specs/2026-05-16-yamlless-hf-deploy-design.md.
 """
 from __future__ import annotations
 
@@ -28,32 +25,37 @@ from vla_project.deployment.inference_server import build_app
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="X-VLA-Adapter inference HTTP server")
-    ap.add_argument("--predictor", choices=["hold_position", "xvla_adapter"], required=True)
-    ap.add_argument("--checkpoint", required=False, default=None,
-                    help="ckpt export dir (required iff --predictor xvla_adapter)")
-    ap.add_argument("--deploy-config", required=True)
-    ap.add_argument("--domain-id", type=int, required=True)
+    ap.add_argument("--checkpoint", required=True,
+                    help="local ckpt dir, HF id 'org/repo', or 'org/repo/subfolder'")
+    ap.add_argument("--predictor", choices=["hold_position", "xvla_adapter"],
+                    default="xvla_adapter")
+    ap.add_argument("--domain-id", type=int, default=None,
+                    help="defaults to cfg.data.domain_id from meta.json")
+    ap.add_argument("--unnorm-key", default=None,
+                    help="required iff meta.norm_stats has >1 keys")
+    ap.add_argument("--trust-checkpoint-code", action="store_true",
+                    help="opt-in to load post_process.py from HF-resolved ckpts")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8000)
-    ap.add_argument("--inject-sleep", type=float, default=0.0,
-                    help="test-only: sleep N seconds before predict to exercise the latency log path")
+    ap.add_argument("--device", default="cuda:0")
+    ap.add_argument("--dtype", default="bf16", choices=["bf16", "fp32"])
+    ap.add_argument("--torch-compile", default="off",
+                    choices=["off", "reduce-overhead", "default"])
+    ap.add_argument("--warmup-iters", type=int, default=1)
     args = ap.parse_args(argv)
 
-    # logging.basicConfig stays here intentionally: entry-point convention.
-    # Moving it into build_app would mean library import has global side-effects
-    # on root logger config, which is bad practice.
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-
-    # Predictor/checkpoint validation lives in build_app only (CLAUDE.md "Scripts"
-    # thinness rule). build_app raises ValueError if --checkpoint is missing for
-    # xvla_adapter mode; we catch it here to present an argparse-style CLI error.
     try:
         app = build_app(
-            predictor_kind=args.predictor,
             checkpoint=args.checkpoint,
-            deploy_config_path=args.deploy_config,
+            predictor_kind=args.predictor,
             domain_id=args.domain_id,
-            inject_sleep_s=args.inject_sleep,
+            unnorm_key=args.unnorm_key,
+            trust_checkpoint_code=args.trust_checkpoint_code,
+            device=args.device,
+            dtype=args.dtype,
+            torch_compile=args.torch_compile,
+            warmup_iters=args.warmup_iters,
         )
     except ValueError as e:
         ap.error(str(e))
