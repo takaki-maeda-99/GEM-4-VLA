@@ -1,9 +1,9 @@
-"""ModelRuntime stub: loads meta.json + provides startup validation hooks.
-Full forward path is Phase 1.
+"""ModelRuntime: loads meta.json + raises MetaJsonError on bad input.
 
-Also covers the build_app() startup assertion errors that are wired through
-domain_adapter.validate_startup_xvla; this file focuses on the runtime side
-(meta loading + paths)."""
+Tests here exercise only the meta-loading path (no model weights needed).
+from_export stops early on missing/malformed meta.json before touching the
+neural network, so these tests run without GPU or real checkpoints.
+"""
 import json
 
 import pytest
@@ -22,24 +22,19 @@ def test_from_export_missing_meta_json_raises(tmp_path):
         ModelRuntime.from_export(tmp_path)
 
 
-def test_from_export_loads_step_and_cfg_norm_stats(tmp_path):
+def test_from_export_missing_step_key_raises(tmp_path):
     _write_meta(tmp_path, {
-        "step": 15000,
-        "cfg": {"model": {"num_domains": 1}, "data": {"unnorm_key": "k"}},
-        "norm_stats": {"k": {"action": {}, "proprio": {}}},
+        "cfg": {"model": {"num_domains": 1}},
+        "norm_stats": {},
     })
-    rt = ModelRuntime.from_export(tmp_path)
-    assert rt.step == 15000
-    assert rt.cfg["model"]["num_domains"] == 1
-    assert "k" in rt.norm_stats
+    with pytest.raises(MetaJsonError, match="step"):
+        ModelRuntime.from_export(tmp_path)
 
 
-def test_call_raises_not_implemented_in_phase_0(tmp_path):
+def test_from_export_missing_norm_stats_key_raises(tmp_path):
     _write_meta(tmp_path, {
         "step": 0,
-        "cfg": {"model": {"num_domains": 1}, "data": {"unnorm_key": "k"}},
-        "norm_stats": {"k": {}},
+        "cfg": {"model": {"num_domains": 1}},
     })
-    rt = ModelRuntime.from_export(tmp_path)
-    with pytest.raises(NotImplementedError, match="Phase 1"):
-        rt({})
+    with pytest.raises(MetaJsonError, match="norm_stats"):
+        ModelRuntime.from_export(tmp_path)
