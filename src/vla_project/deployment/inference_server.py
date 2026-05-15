@@ -16,6 +16,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from vla_project.data import constants as C
 from vla_project.deployment.metadata import build_metadata_response
 from vla_project.deployment.predictors.base import ChunkPredictor
 from vla_project.deployment.predictors.hold_position import HoldPositionChunkPredictor
@@ -66,14 +67,18 @@ def build_app(
     if domain_id is None:
         domain_id = int(meta["cfg"]["data"]["domain_id"])
 
-    action_dim = len(meta["norm_stats"][resolved_unnorm_key]["action"]["q99"])
+    action_dim = C.ACTION_DIM
     validate_runtime(
         meta, unnorm_key=resolved_unnorm_key,
         domain_id=domain_id, model_action_dim=action_dim,
     )
     wrist_hard_required = derive_wrist_hard_required(meta)
 
-    action_chunk_len = int(meta["cfg"]["data"]["action_chunk_len"])
+    action_chunk_len = int(
+        meta["cfg"].get("data", {}).get("action_chunk_len")
+        or meta["cfg"].get("model", {}).get("action_chunk_len")
+        or C.ACTION_CHUNK_LEN
+    )
     if predictor_kind == "hold_position":
         predictor: ChunkPredictor = HoldPositionChunkPredictor(
             chunk_len=action_chunk_len,
@@ -166,22 +171,47 @@ def build_app(
         try:
             native = predictor.predict(obs)
         except Exception as e:
+            elapsed_ms = (time.monotonic_ns() - t0) / 1e6
+            logger.error(
+                f"predictor_error request_id={request_id} elapsed_ms={elapsed_ms:.1f}"
+                f" error={type(e).__name__}: {e}",
+                exc_info=True,
+            )
             raise HTTPException(status_code=500, detail=str(e)) from e
 
         if np.isnan(native).any():
+            elapsed_ms = (time.monotonic_ns() - t0) / 1e6
+            logger.error(
+                f"predictor_nan request_id={request_id} elapsed_ms={elapsed_ms:.1f}"
+            )
             raise HTTPException(status_code=500, detail="predictor emitted NaN")
 
         if post_process_fn is not None:
             try:
                 native = post_process_fn(native, meta)
             except Exception as e:
+                elapsed_ms = (time.monotonic_ns() - t0) / 1e6
+                logger.error(
+                    f"postprocess_error request_id={request_id} elapsed_ms={elapsed_ms:.1f}"
+                    f" error={type(e).__name__}: {e}",
+                    exc_info=True,
+                )
                 raise HTTPException(status_code=500, detail=f"post_process: {e}") from e
             if not isinstance(native, np.ndarray) or native.shape[-1] != action_dim:
+                elapsed_ms = (time.monotonic_ns() - t0) / 1e6
+                logger.error(
+                    f"postprocess_bad_shape request_id={request_id} elapsed_ms={elapsed_ms:.1f}"
+                    f" shape={getattr(native, 'shape', None)}"
+                )
                 raise HTTPException(
                     status_code=500,
                     detail=f"post_process returned bad shape {getattr(native, 'shape', None)}",
                 )
             if np.isnan(native).any():
+                elapsed_ms = (time.monotonic_ns() - t0) / 1e6
+                logger.error(
+                    f"postprocess_nan request_id={request_id} elapsed_ms={elapsed_ms:.1f}"
+                )
                 raise HTTPException(status_code=500, detail="post_process emitted NaN")
 
         actions = native.astype(np.float32).tolist()
