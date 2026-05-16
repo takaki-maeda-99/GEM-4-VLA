@@ -1,9 +1,9 @@
 """ChunkPredictor ABC.
 
-A predictor takes a fully-prepped Obs dict (post DomainAdapter.preprocess)
-and returns a (T, A) np.float32 chunk in MODEL NATIVE physical units.
-DomainAdapter.postprocess handles frame / gripper-convention conversion to
-MimicRec contract units.
+A predictor takes a fully-prepped Obs dict (with JPEG-decoded images,
+normalized proprio, and language instruction) and returns a (T, A) np.float32
+chunk in MODEL NATIVE physical units. The caller handles frame / gripper-convention
+conversion to MimicRec contract units.
 
 For v36 (and v33/v35 RLDS-trained), native gripper is normalized_0_1
 (closed=0, open=1), frame is LIBERO world frame, deltas are

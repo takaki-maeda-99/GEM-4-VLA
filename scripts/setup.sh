@@ -38,14 +38,11 @@ gemma4_keys = [k for k in CONFIG_MAPPING_NAMES if k.startswith("gemma4")]
 assert gemma4_keys, "Gemma4 model_type not registered (need transformers>=5.0)"
 print(f"  Gemma4      = {gemma4_keys}")
 
-# Deployment package: verify fastapi/uvicorn/pyyaml + build_app importable
-import fastapi, uvicorn, yaml
+# Deployment package: verify fastapi/uvicorn + build_app importable
+import fastapi, uvicorn
 from vla_project.deployment.inference_server import build_app
-from vla_project.deployment.domain_adapter import load_deploy_config
-print(f"  fastapi     = {fastapi.__version__}  uvicorn={uvicorn.__version__}  pyyaml={yaml.__version__}")
-cfg = load_deploy_config("configs/deploy/v36_libero_spatial.yaml")
-assert cfg.ckpt.expected_action_chunk_len == 8
-print(f"  deployment  = build_app importable, v36 deploy yaml loads OK")
+print(f"  fastapi     = {fastapi.__version__}  uvicorn={uvicorn.__version__}")
+print(f"  deployment  = build_app importable")
 PY
 
 # 5. Runtime notes (host-specific paths NOT auto-configured)

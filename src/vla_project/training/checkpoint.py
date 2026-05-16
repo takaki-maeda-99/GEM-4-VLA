@@ -54,6 +54,33 @@ def _resolve_cfg(cfg: Any) -> Any:
     return cfg
 
 
+def build_meta_dict(
+    *,
+    step: int,
+    cfg: dict,
+    norm_stats: dict,
+    git_commit: str,
+    tokenizer_settings: Optional[Dict[str, Any]] = None,
+) -> dict:
+    """Construct the meta.json dict from training-time inputs.
+
+    If cfg.data.native_action is present, include it as a top-level
+    ``native_action`` block so downstream consumers (HF deploy, inference
+    server) can read action-space metadata without loading the full cfg.
+    """
+    meta: Dict[str, Any] = {
+        "step": int(step),
+        "cfg": cfg,
+        "norm_stats": norm_stats,
+        "tokenizer_settings": tokenizer_settings,
+        "git_commit": git_commit,
+    }
+    native_action = cfg.get("data", {}).get("native_action")
+    if native_action is not None:
+        meta["native_action"] = native_action
+    return meta
+
+
 def save_checkpoint(
     out_dir: Union[str, Path],
     model: nn.Module,
@@ -76,13 +103,13 @@ def save_checkpoint(
     if optimizer is not None:
         torch.save(optimizer.state_dict(), tmp / "optimizer.pt")
 
-    meta = {
-        "step": int(step),
-        "cfg": _resolve_cfg(cfg),
-        "norm_stats": norm_stats,
-        "tokenizer_settings": tokenizer_settings,
-        "git_commit": _git_commit(),
-    }
+    meta = build_meta_dict(
+        step=step,
+        cfg=_resolve_cfg(cfg),
+        norm_stats=norm_stats,
+        git_commit=_git_commit(),
+        tokenizer_settings=tokenizer_settings,
+    )
     (tmp / "meta.json").write_text(json.dumps(meta, indent=2))
 
     # Atomic replace: remove any existing dir at the target path, then rename.
