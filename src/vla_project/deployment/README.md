@@ -2,26 +2,19 @@
 
 Hosts an X-VLA-Adapter checkpoint behind MimicRec's `POST /predict` contract.
 
-**Design:** see `docs/superpowers/specs/2026-05-06-vla-inference-server-design.md`.
-**Implementation plan:** see `docs/superpowers/plans/2026-05-06-vla-inference-server-phase0.md`.
+The server returns **model-native, fully q99-denormalized action chunks** with optional per-checkpoint `post_process.py` applied. Contract translation (frame conversion, gripper convention mapping, raw proprio adaptation) is the client's responsibility.
 
----
-
-## Phase status
-
-- **Phase 0 (this code):** Skeleton + `HoldPositionChunkPredictor` end-to-end. `XVLAAdapterChunkPredictor` is a stub raising `NotImplementedError("Phase 1")`. `ModelRuntime.__call__` likewise. No GPU required, no real ckpt required.
-- **Phase 1 (next):** Train v36 ckpt, plug `XVLAAdapterChunkPredictor` real forward path + `ModelRuntime` torch wrapper. Live latency benchmark.
+**Design:** see [`docs/superpowers/specs/2026-05-16-yamlless-hf-deploy-design.md`](../../docs/superpowers/specs/2026-05-16-yamlless-hf-deploy-design.md) (supersedes the prior 2026-05-06 spec for deploy YAML structure and contract division).
 
 ---
 
 ## Starting the server
 
-### HoldPosition mode (Phase 0; no GPU / no ckpt required)
+### HoldPosition mode (no GPU / no ckpt required)
 
 ```bash
 uv run python scripts/serve.py \
   --predictor hold_position \
-  --domain-id 0 \
   --port 8001
 ```
 
@@ -31,25 +24,24 @@ curl http://localhost:8001/healthz
 # {"status":"ok","predictor":"HoldPositionChunkPredictor","ready_at_ns":...}
 ```
 
-### XVLAAdapter mode
-
-In **Phase 0**, `--predictor xvla_adapter` works as a startup-validation
-exerciser only. It loads `meta.json` (no GPU / no torch model load), runs all
-`validate_startup_xvla` hard-fail asserts, and starts the FastAPI app — but
-`POST /predict` returns **HTTP 500** with `error_class=NotImplementedError`
-because `XVLAAdapterChunkPredictor.predict()` is stubbed for Phase 1.
+### XVLAAdapter mode (real inference)
 
 ```bash
 uv run python scripts/serve.py \
-  --predictor xvla_adapter \
-  --checkpoint ~/X-VLA-Adapter_export/v33_step40000 \
-  --domain-id 0 \
+  --checkpoint takaki99/GEM-4-FT-bottle \
+  --trust-checkpoint-code \
   --port 8001
-# /healthz → ok; /predict → 500 NotImplementedError
+
+curl http://localhost:8001/healthz
+# {"status":"ok","predictor":"XVLAAdapterChunkPredictor","ready_at_ns":...}
+
+# Or use a local checkpoint directory:
+uv run python scripts/serve.py \
+  --checkpoint outputs/so101_v46_step30k_ft_dl50/checkpoints/step_2000 \
+  --port 8001
 ```
 
-In **Phase 1**, the same command (with a v36 ckpt) will produce real action
-chunks. GPU is required only in Phase 1.
+GPU is required for `xvla_adapter` mode.
 
 ---
 
@@ -60,27 +52,29 @@ There is no reload endpoint. Kill the process and restart with the new
 
 ---
 
-## Adding a new robot deployment
+## Client contract division
 
-Robot-specific config (proprio source/adapt, action frame/gripper convention) is no longer loaded from YAML files. Instead, it is baked into the checkpoint's `meta.json` during training and passed directly to the runtime via CLI arguments or environment variables.
+The server returns **model-native units** (fully q99-denormalized). The client is
+responsible for:
 
-See `scripts/serve.py --help` and the spec `docs/superpowers/specs/2026-05-06-vla-inference-server-design.md` for details on providing robot-specific metadata at deployment time.
+1. **Proprio adaptation** — map raw robot sensors to the model's expected proprioceptive format (e.g., [ee_x, ee_y, ee_z, rotvec_x, rotvec_y, rotvec_z, gripper, pad]).
+2. **Frame conversion** — transform actions from model-native frame (e.g., world-absolute) to the target robot frame (e.g., ee-local).
+3. **Gripper convention** — if the model predicts normalized gripper [0, 1] but the robot expects raw gripper pwm or voltage, apply the post_process script (auto-loaded if `--trust-checkpoint-code` is passed) or implement conversion in the client.
+
+See the spec for detailed examples.
 
 ---
 
-## Known limitations (Phase 0)
+## Known limitations
 
-- **Frame conversion not implemented.** Set `wire_only_smoke: true` for cross-frame deploy yamls (motion will be wrong; useful only for wire-format smoke).
-- **HoldPosition is not a safety fallback.** It is for wire-shape smoke / pre-model-trained sentinel. MimicRec's slow-stop ramp is the real fallback for missing-action conditions.
-- **No `/admin/reload` endpoint.** Kill + restart for ckpt swap.
 - **`max_inflight=1` only** (matches MimicRec's MVP setting). No request batching.
-- **Latency benchmark deferred.** Target p95 < 266 ms after `torch.compile` warmup; not measured in Phase 0.
+- **Latency target:** p95 < 266 ms after `torch.compile` warmup on RTX 6000 Ada with bf16.
 
 ---
 
-## Phase 0 acceptance verification
+## Test suite
 
-Run the core yamlless test suite:
+Run the yamlless deploy test suite:
 
 ```bash
 PYTHONPATH= uv run pytest \
@@ -97,5 +91,3 @@ PYTHONPATH= uv run pytest \
   tests/test_backfill_native_action.py \
   -v
 ```
-
-Expected: 50 passed.

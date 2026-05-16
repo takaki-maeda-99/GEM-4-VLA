@@ -89,20 +89,24 @@ Eval rolls out 50 episodes per suite; metrics + per-task results write to
 FastAPI HTTP server hosting an X-VLA-Adapter checkpoint behind MimicRec's
 `POST /predict` contract. Two predictor modes:
 
-- **`hold_position`** (Phase 0) — emits a constant action chunk. No GPU / no
+- **`hold_position`** — emits a constant action chunk. No GPU / no
   ckpt required. Use for wire-format smoke testing.
-- **`xvla_adapter`** (Phase 1) — loads a real ckpt and runs forward
+- **`xvla_adapter`** (default) — loads a real ckpt and runs forward
   passes; returns the model's denormalized action chunk in NATIVE units.
-  Requires a checkpoint dir (`meta.json` + `model.pt`) + matching deploy
-  YAML.
+  Requires a checkpoint dir (`meta.json` + `model.pt`).
+
+The server returns **model-native, fully q99-denormalized action chunks**
+(with optional per-checkpoint `post_process.py` applied). Contract
+translation (frame conversion, gripper convention mapping, raw proprio
+adaptation) is the client's responsibility. See
+[`docs/superpowers/specs/2026-05-16-yamlless-hf-deploy-design.md`](docs/superpowers/specs/2026-05-16-yamlless-hf-deploy-design.md)
+for details.
 
 ### HoldPosition smoke (no GPU)
 
 ```bash
 uv run python scripts/serve.py \
   --predictor hold_position \
-  --deploy-config configs/deploy/v36_libero_spatial.yaml \
-  --domain-id 0 \
   --port 8001
 
 curl http://127.0.0.1:8001/healthz
@@ -111,53 +115,55 @@ curl http://127.0.0.1:8001/healthz
 
 ### XVLAAdapter (real ckpt)
 
-The deploy YAML pins the ckpt's expected dims + describes the
-proprio/action adapter (raw client units → model units → MimicRec contract
-units). See [`configs/deploy/_template.yaml`](configs/deploy/_template.yaml)
-for the schema and [`configs/deploy/so101_v46.yaml`](configs/deploy/so101_v46.yaml)
-for a working SO101 example.
-
 `--checkpoint` accepts either a local directory or a Hugging Face repo
 id (`org/repo` or `org/repo/subfolder`). When given an HF id,
 `ModelRuntime.from_export` calls `huggingface_hub.snapshot_download` and
 caches under `~/.cache/huggingface/hub/`; subsequent loads are free.
 
 ```bash
-# Load directly from Hugging Face Hub (preferred for deploy: reproducible,
-# no local-state coupling).
+# Load directly from Hugging Face Hub.
 CUDA_VISIBLE_DEVICES=0 \
   uv run python scripts/serve.py \
-    --predictor xvla_adapter \
-    --checkpoint takaki99/so101-v46/step_2000 \
-    --deploy-config configs/deploy/so101_v46.yaml \
-    --domain-id 9 \
-    --host 127.0.0.1 \
+    --checkpoint takaki99/GEM-4-FT-bottle \
     --port 8001
 
-# Or use a local checkpoint directory (faster for in-development iteration).
+# To enable the ckpt-bundled post_process.py for HF-resolved ckpts,
+# explicitly opt in:
 CUDA_VISIBLE_DEVICES=0 \
   uv run python scripts/serve.py \
-    --predictor xvla_adapter \
+    --checkpoint takaki99/GEM-4-FT-bottle \
+    --trust-checkpoint-code \
+    --port 8001
+
+# Local ckpt directory.
+CUDA_VISIBLE_DEVICES=0 \
+  uv run python scripts/serve.py \
     --checkpoint outputs/so101_v46_step30k_ft_dl50/checkpoints/step_2000 \
-    --deploy-config configs/deploy/so101_v46.yaml \
-    --domain-id 9 \
-    --host 127.0.0.1 \
     --port 8001
 
 curl http://127.0.0.1:8001/healthz
 # {"status":"ok","predictor":"XVLAAdapterChunkPredictor","ready_at_ns":...}
 
 # /predict body: PredictRequest schema = {image_primary, image_wrist (b64 JPEG),
-#   proprio (raw client units, per deploy yaml proprio.source), instruction}
-# Response: {"actions": list[list[float]]}  shape (T, A) in native units.
+#   proprio (model-input shape, already adapted by client), instruction}
+# Response: {"actions": list[list[float]]}  shape (T, A) in model native units.
 ```
 
 Available HF ckpts:
+- [`takaki99/GEM-4-FT-bottle`](https://huggingface.co/takaki99/GEM-4-FT-bottle) — pass `--trust-checkpoint-code` to enable the bundled gripper post-process; otherwise actions return raw passthrough.
 - [`takaki99/so101-v46/step_2000`](https://huggingface.co/takaki99/so101-v46/tree/main/step_2000) — early FT checkpoint (smoke-verified, not yet evaluated on real robot)
 
 A minimal smoke client lives nowhere yet; the test harness in
 `tests/deployment/` exercises both predictor paths and is the easiest
 reference for building a request.
+
+**Note (schema drift):** The xvla_adapter predictor path against
+`takaki99/GEM-4-FT-bottle` is currently blocked by a pre-existing schema
+drift in `VLAPolicyConfig` (4 fields not yet accepted by the current
+Pydantic model: `prompt_in_task_stream`, `proprio_in_task_stream`,
+`soft_prompt_as_cross_attn_stream`, `legacy_external_in_self_pool`). This
+is unrelated to the yamlless refactor; the hold_position smoke path works
+fine. Tracked as a follow-up.
 
 Per-request latency on a single RTX 6000 Ada with bf16 + `torch_compile: off`
 is ~220 ms (budget 266 ms, logged as a warning if exceeded).
