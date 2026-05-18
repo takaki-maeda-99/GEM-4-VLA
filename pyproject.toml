@@ -2,10 +2,17 @@
 name = "vla_project"
 version = "0.0.1"
 description = "X-VLA-Adapter: Gemma4 + SigLIP + per-domain VLA-Adapter head"
-requires-python = ">=3.10,<3.12"  # tensorflow==2.15.0 (via dlimp) ships wheels for Python 3.9-3.11 only
+# Both target environments (envs/x86, envs/jetson) currently require Python 3.10.
+# x86 cu128 wheels also ship for 3.11, but the Jetson jetson-ai-lab index only
+# publishes cp310 wheels, so we constrain the whole project to 3.10 for parity.
+requires-python = ">=3.10,<3.11"
+# Abstract runtime deps. Concrete torch / index pins live in envs/<env>/pyproject.toml.
+# This pyproject only declares the `vla_project` Python package itself; the per-env
+# pyprojects pull it in via a path dep and add the env-specific concrete pins,
+# data-pipeline extras (dlimp/tensorflow), and PyTorch wheel sources.
 dependencies = [
-    "torch>=2.4",
-    "torchvision>=0.19",
+    "torch",
+    "torchvision",
     "transformers>=5.5",   # Gemma4 model_type requires 5.5+ (5.0-5.4 only ships gemma3n)
     "accelerate>=1.0",
     "omegaconf>=2.3",
@@ -28,18 +35,8 @@ dependencies = [
     "uvicorn[standard]>=0.32",
     "httpx>=0.27",         # for FastAPI TestClient
     "pyyaml>=6.0",         # explicit (currently transitive)
-    "dlimp @ git+https://github.com/moojink/dlimp_openvla@040105d256bd28866cc6620621a3d5f7b6b91b46",  # OXE/RLDS pipeline; transitively pulls tensorflow==2.15.0 + tensorflow_datasets>=4.9.2
-    "tensorflow-graphics>=2021.12",  # imported by prismatic/vla/datasets/rlds/oxe/utils/droid_utils.py (zero_action_filter)
     "bitsandbytes>=0.41",  # NF4 backbone quantization + AdamW8bit (optimizer_kind="adamw_8bit")
     "timm>=1.0.26",
-]
-
-[project.optional-dependencies]
-dev = [
-    "pytest>=8.0",
-    "pytest-xdist>=3.5",
-    "ruff>=0.6",
-    "mypy>=1.10",
 ]
 
 [build-system]
@@ -49,7 +46,7 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/vla_project"]
 
-# Permit `dlimp @ git+https://...` direct reference in dependencies.
+# Permit `dlimp @ git+https://...` direct reference in envs/x86/pyproject.toml.
 # dlimp is a fork of dlimp_openvla published only on GitHub, never on PyPI;
 # the moojink/dlimp_openvla pin commit is the canonical OpenVLA / OXE
 # RLDS data-pipeline implementation that all our baselines depend on.
@@ -60,21 +57,3 @@ allow-direct-references = true
 testpaths = ["tests"]
 addopts = "-q -ra"
 filterwarnings = ["ignore::UserWarning"]
-
-# Pin torch/torchvision to PyTorch's cu128 wheels because the host
-# CUDA driver (12.8.0) is older than the cu130 wheels that uv would
-# otherwise resolve. cu128 covers driver >= 12.6 which our system has.
-[tool.uv.sources]
-torch = { index = "pytorch-cu128" }
-torchvision = { index = "pytorch-cu128" }
-
-# Override lerobot's optional `transformers<5.0.0` upper cap. We need
-# transformers>=5.x for Gemma4 model_type support; lerobot's core API
-# (LeRobotDataset) does not depend on transformers internals.
-[tool.uv]
-override-dependencies = ["transformers>=5.5"]
-
-[[tool.uv.index]]
-name = "pytorch-cu128"
-url = "https://download.pytorch.org/whl/cu128"
-explicit = true

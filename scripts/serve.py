@@ -16,7 +16,15 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
+
+# Jetson (Tegra) does not implement NVML the way PyTorch's caching allocator
+# expects, which makes `model.to('cuda')` fail with
+# `NVML_SUCCESS == r INTERNAL ASSERT FAILED at CUDACachingAllocator.cpp`.
+# These must be set before torch is imported (transitively via inference_server).
+os.environ.setdefault("PYTORCH_NVML_BASED_CUDA_CHECK", "0")
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:False")
 
 import uvicorn
 
