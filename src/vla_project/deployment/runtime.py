@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Any, Callable, Dict, Tuple
 
 import torch
 from huggingface_hub import snapshot_download
@@ -23,6 +23,7 @@ from huggingface_hub import snapshot_download
 from vla_project.data import constants as C
 from vla_project.data.transforms.image import SiglipImageTransform
 from vla_project.data.transforms.language import GemmaPromptTokenizer
+from vla_project.deployment.post_process_loader import load_post_process
 from vla_project.models.language.gemma4_wrapper import Gemma4Wrapper
 from vla_project.models.vision.factory import build_vision_encoder
 from vla_project.models.vla_policy import VLAPolicy, VLAPolicyConfig
@@ -45,24 +46,24 @@ def _resolve_dtype(name: str) -> torch.dtype:
     return _DTYPE_MAP[name]
 
 
-def _resolve_ckpt_dir(ckpt_dir: str | Path) -> Path:
-    """Resolve ckpt_dir → local directory containing meta.json + model.pt.
+def _resolve_ckpt_dir(ckpt_dir: str | Path) -> Tuple[Path, bool]:
+    """Resolve ckpt_dir → (local_path, is_local).
 
     Accepts:
-      - a local directory path (existing) → returned as-is.
+      - a local directory path (existing) → ``(p, True)``.
       - an HF model repo id ``org/repo`` (no local path) → ``snapshot_download``
-        the whole repo to the HF cache and return that path.
+        the whole repo to the HF cache and return ``(local, False)``.
       - an HF model repo + subfolder ``org/repo/subfolder`` (e.g.
         ``takaki99/so101-v46/step_2000``) → ``snapshot_download`` with
-        ``allow_patterns=[f"{subfolder}/*"]`` and return the subfolder
-        inside the cache.
+        ``allow_patterns=[f"{subfolder}/*"]`` and return ``(sub, False)``.
 
     The HF cache is `~/.cache/huggingface/hub/` by default, so subsequent
-    loads are free.
+    loads are free. ``is_local`` is ``True`` only when the path already existed
+    on disk; it is ``False`` for HF-resolved paths.
     """
     p = Path(ckpt_dir)
     if p.exists():
-        return p
+        return p, True
     s = str(ckpt_dir)
     # Reject absolute / relative-with-prefix paths from the HF heuristic
     # (codex round 5): a missing absolute path like "/foo/bar" is clearly
@@ -74,7 +75,7 @@ def _resolve_ckpt_dir(ckpt_dir: str | Path) -> Path:
     if len(parts) == 2:
         # bare repo_id like "takaki99/so101-v46" — pull everything
         local = Path(snapshot_download(repo_id=str(ckpt_dir), repo_type="model"))
-        return local
+        return local, False
     if len(parts) == 3:
         # repo_id + subfolder like "takaki99/so101-v46/step_2000"
         repo_id = "/".join(parts[:2])
@@ -88,7 +89,7 @@ def _resolve_ckpt_dir(ckpt_dir: str | Path) -> Path:
             raise FileNotFoundError(
                 f"resolved HF repo {repo_id!r} but subfolder {subfolder!r} not present in download"
             )
-        return sub
+        return sub, False
     raise FileNotFoundError(
         f"ckpt_dir {ckpt_dir!r} not found locally and not in 'org/repo' or "
         f"'org/repo/subfolder' HF form (got {len(parts)} path components)"
@@ -103,11 +104,15 @@ class ModelRuntime:
         cfg: Dict[str, Any],
         norm_stats: Dict[str, Any],
         ckpt_dir: Path,
-        model: VLAPolicy,
-        tokenizer: GemmaPromptTokenizer,
-        image_transform: SiglipImageTransform,
+        model: VLAPolicy | None,
+        tokenizer: GemmaPromptTokenizer | None,
+        image_transform: SiglipImageTransform | None,
         device: torch.device,
         dtype: torch.dtype,
+        is_local: bool,
+        post_process_fn: Callable | None,
+        post_process_path: str | None,
+        meta_raw: dict,
     ) -> None:
         self.step = step
         self.cfg = cfg
@@ -118,6 +123,10 @@ class ModelRuntime:
         self.image_transform = image_transform
         self.device = device
         self.dtype = dtype
+        self.is_local = is_local
+        self.post_process_fn = post_process_fn
+        self.post_process_path = post_process_path
+        self.meta_raw = meta_raw
 
     @classmethod
     def from_export(
@@ -128,10 +137,11 @@ class ModelRuntime:
         dtype: str = "bf16",
         torch_compile: str = "off",
         warmup_iters: int = 1,
+        trust_checkpoint_code: bool = False,
     ) -> "ModelRuntime":
         # Accept local path or HF repo id (see _resolve_ckpt_dir). HF
         # downloads are cached at ~/.cache/huggingface/hub/.
-        ckpt_dir = _resolve_ckpt_dir(ckpt_dir)
+        ckpt_dir, is_local = _resolve_ckpt_dir(ckpt_dir)
         meta_path = ckpt_dir / "meta.json"
         if not meta_path.is_file():
             raise MetaJsonError(f"missing meta.json under {ckpt_dir}")
@@ -162,6 +172,11 @@ class ModelRuntime:
         # baseline wrist_proj weights when use_wrist_bridge=True is dead).
         load_checkpoint(str(ckpt_dir), model, strict=False)
 
+        post_process_fn = load_post_process(
+            ckpt_dir, is_local=is_local, trust_checkpoint_code=trust_checkpoint_code,
+        )
+        post_process_path = str(ckpt_dir / "post_process.py") if post_process_fn is not None else None
+
         if torch_compile != "off":
             # bs=1 stable-shape inference: reduce-overhead (CUDA graphs)
             # tends to win; default also valid. fullgraph=False allows the
@@ -188,6 +203,10 @@ class ModelRuntime:
             image_transform=image_transform,
             device=torch_device,
             dtype=torch_dtype,
+            is_local=is_local,
+            post_process_fn=post_process_fn,
+            post_process_path=post_process_path,
+            meta_raw=meta,
         )
 
         # Warmup forward(s) reduce first-call latency (especially with
@@ -196,6 +215,48 @@ class ModelRuntime:
             runtime._warmup_forward()
 
         return runtime
+
+    @classmethod
+    def from_meta_only(
+        cls,
+        ckpt_dir: str | Path,
+        *,
+        trust_checkpoint_code: bool = False,
+    ) -> "ModelRuntime":
+        """Lightweight load for predictors that don't need the actual model (e.g., HoldPosition smoke).
+
+        Sets model=None; do not use with XVLAAdapter. Loads meta.json and
+        post_process.py only — no model weights, no tokenizer, no image_transform.
+        """
+        ckpt_dir, is_local = _resolve_ckpt_dir(ckpt_dir)
+        meta_path = ckpt_dir / "meta.json"
+        if not meta_path.is_file():
+            raise MetaJsonError(f"missing meta.json under {ckpt_dir}")
+        meta = json.loads(meta_path.read_text())
+        for required_key in ("step", "cfg", "norm_stats"):
+            if required_key not in meta:
+                raise MetaJsonError(f"meta.json missing required key {required_key!r}")
+
+        post_process_fn = load_post_process(
+            ckpt_dir, is_local=is_local, trust_checkpoint_code=trust_checkpoint_code,
+        )
+        post_process_path = str(ckpt_dir / "post_process.py") if post_process_fn is not None else None
+
+        return cls(
+            step=int(meta["step"]),
+            cfg=meta["cfg"],
+            norm_stats=meta["norm_stats"],
+            ckpt_dir=ckpt_dir,
+            model=None,
+            tokenizer=None,
+            image_transform=None,
+            device=torch.device("cpu"),
+            dtype=torch.float32,
+            is_local=is_local,
+            post_process_fn=post_process_fn,
+            post_process_path=post_process_path,
+            meta_raw=meta,
+        )
 
     def _warmup_forward(self) -> None:
         # action_chunk_len lives under cfg.data in the project's train YAMLs

@@ -1,12 +1,9 @@
-"""FastAPI app factory + /predict + /healthz routes.
+"""Yamlless inference HTTP server.
 
-Reads deploy yaml + (optionally) ckpt meta.json, constructs DomainAdapter
-and ChunkPredictor, mounts the FastAPI app. See spec §Section 6 for
-HTTP code mapping, observability fields, and Phase 0 acceptance gate.
+See docs/superpowers/specs/2026-05-16-yamlless-hf-deploy-design.md.
 """
 from __future__ import annotations
 
-import json
 import logging
 import time
 import uuid
@@ -15,105 +12,98 @@ from typing import Literal
 
 import numpy as np
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from vla_project.deployment.domain_adapter import (
-    DomainAdapter,
-    load_deploy_config,
-)
+from vla_project.data import constants as C
+from vla_project.deployment.metadata import build_metadata_response
 from vla_project.deployment.predictors.base import ChunkPredictor
 from vla_project.deployment.predictors.hold_position import HoldPositionChunkPredictor
 from vla_project.deployment.predictors.xvla_adapter import XVLAAdapterChunkPredictor
 from vla_project.deployment.runtime import ModelRuntime
 from vla_project.deployment.schemas import PredictRequest, PredictResponse
-
+from vla_project.deployment.startup_validation import (
+    HardFailAssertion,
+    derive_wrist_hard_required,
+    resolve_unnorm_key,
+    validate_runtime,
+)
+from vla_project.deployment.wire_io import (
+    decode_jpeg_b64,
+    normalize_proprio_q99,
+)
 
 logger = logging.getLogger("vla_project.deployment")
 
 
-_LATENCY_BUDGET_MS = 266.0  # spec §Section 3 latency budget breakdown
-
-
 def build_app(
     *,
-    predictor_kind: Literal["hold_position", "xvla_adapter"],
-    checkpoint: str | Path | None,
-    deploy_config_path: str | Path,
-    domain_id: int,
+    checkpoint: str | Path,
+    predictor_kind: Literal["xvla_adapter", "hold_position"] = "xvla_adapter",
+    domain_id: int | None = None,
+    unnorm_key: str | None = None,
+    trust_checkpoint_code: bool = False,
+    device: str = "cuda:0",
+    dtype: str = "bf16",
+    torch_compile: str = "off",
+    warmup_iters: int = 1,
     inject_sleep_s: float = 0.0,
 ) -> FastAPI:
-    cfg = load_deploy_config(deploy_config_path)
-
-    runtime: ModelRuntime | None = None
-    norm_stats: dict | None = None
-
     if predictor_kind == "xvla_adapter":
-        if checkpoint is None:
-            raise ValueError("--checkpoint required when predictor_kind=xvla_adapter")
         runtime = ModelRuntime.from_export(
-            checkpoint,
-            device=cfg.runtime.device,
-            dtype=cfg.runtime.dtype,
-            torch_compile=cfg.runtime.torch_compile,
-            warmup_iters=cfg.runtime.warmup_iters,
-        )
-        norm_stats = runtime.norm_stats
-        DomainAdapter.validate_startup_xvla(
-            cfg,
-            meta_cfg=runtime.cfg,
-            norm_stats=norm_stats,
-            domain_id=domain_id,
+            checkpoint, device=device, dtype=dtype,
+            torch_compile=torch_compile, warmup_iters=warmup_iters,
+            trust_checkpoint_code=trust_checkpoint_code,
         )
     else:
-        DomainAdapter.validate_startup_hold_position(cfg, domain_id=domain_id)
-
-    # Compute wrist_hard_required from the loaded ckpt cfg (None for hold_position).
-    wrist_hard_required = False
-    if predictor_kind == "xvla_adapter" and runtime is not None:
-        m_model = runtime.cfg.get("model", {})
-        wrist_hard_required = bool(
-            m_model.get("use_wrist_bridge", False)
-            or m_model.get("use_scene_wrist_dinov2_llm", False)
-            or m_model.get("wrist_dinov2", False)
-            or (m_model.get("wrist_in_llm", False) and float(m_model.get("wrist_view_dropout_p") or 0.0) == 0.0)
+        # hold_position: meta + post_process only, no model load
+        runtime = ModelRuntime.from_meta_only(
+            checkpoint, trust_checkpoint_code=trust_checkpoint_code,
         )
 
-    adapter = DomainAdapter(
-        cfg=cfg,
-        norm_stats=(norm_stats[cfg.ckpt.expected_unnorm_key] if norm_stats else None),
-        domain_id=domain_id,
-        wrist_hard_required=wrist_hard_required,
+    meta = runtime.meta_raw
+    resolved_unnorm_key = resolve_unnorm_key(meta, override=unnorm_key)
+    if domain_id is None:
+        domain_id = int(meta["cfg"]["data"]["domain_id"])
+
+    action_dim = C.ACTION_DIM
+    validate_runtime(
+        meta, unnorm_key=resolved_unnorm_key,
+        domain_id=domain_id, model_action_dim=action_dim,
     )
+    wrist_hard_required = derive_wrist_hard_required(meta)
 
-    predictor: ChunkPredictor
+    action_chunk_len = int(
+        meta["cfg"].get("data", {}).get("action_chunk_len")
+        or meta["cfg"].get("model", {}).get("action_chunk_len")
+        or C.ACTION_CHUNK_LEN
+    )
     if predictor_kind == "hold_position":
-        predictor = HoldPositionChunkPredictor(
-            chunk_len=cfg.ckpt.expected_action_chunk_len,
-            action_dim=cfg.ckpt.expected_action_dim,
-            gripper_native_midpoint=cfg.holdposition.gripper_native_midpoint,
+        predictor: ChunkPredictor = HoldPositionChunkPredictor(
+            chunk_len=action_chunk_len,
+            action_dim=action_dim,
+            gripper_native_midpoint=0.5,
         )
     else:
-        # Phase 1: runtime now holds the model + tokenizer + image_transform
-        # (built in ModelRuntime.from_export). Pass them to the predictor so
-        # it can build a batch dict identical to the training pipeline.
         predictor = XVLAAdapterChunkPredictor(
             runtime=runtime,
             tokenizer=runtime.tokenizer,
             image_transform=runtime.image_transform,
-            action_q99=norm_stats[cfg.ckpt.expected_unnorm_key]["action"],
-            action_chunk_len=cfg.ckpt.expected_action_chunk_len,
-            action_dim=cfg.ckpt.expected_action_dim,
+            action_q99=meta["norm_stats"][resolved_unnorm_key]["action"],
+            action_chunk_len=action_chunk_len,
+            action_dim=action_dim,
             domain_id=domain_id,
         )
 
-    # ---- FastAPI app ----
+    post_process_fn = runtime.post_process_fn
+    post_process_path = runtime.post_process_path
+    proprio_stats = meta["norm_stats"][resolved_unnorm_key]["proprio"]
+
     app = FastAPI(title="X-VLA-Adapter Inference Server")
-    state_ready_at_ns = time.monotonic_ns()
     state = {
-        "predictor_kind": predictor_kind,
         "predictor_class": type(predictor).__name__,
-        "ready_at_ns": state_ready_at_ns,
+        "ready_at_ns": time.monotonic_ns(),
         "inject_sleep_s": float(inject_sleep_s),
     }
 
@@ -125,114 +115,146 @@ def build_app(
             "ready_at_ns": state["ready_at_ns"],
         }
 
-    # Pydantic body-validation errors fire BEFORE the route body, so attach
-    # an exception handler that logs them through our structured channel
-    # rather than letting FastAPI's default 422 responder swallow the event.
+    @app.get("/metadata")
+    async def metadata_route() -> dict:
+        return build_metadata_response(
+            meta,
+            unnorm_key=resolved_unnorm_key,
+            domain_id=domain_id,
+            has_post_process=post_process_fn is not None,
+            post_process_path=post_process_path,
+        )
+
     @app.exception_handler(RequestValidationError)
     async def _on_validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
-        request_id = request.headers.get("X-Request-Id") or uuid.uuid4().hex
-        _log_request(
-            request_id, elapsed_ms=0.0, state=state, domain_id=domain_id,
-            outcome="invalid_request",
-            error_class="RequestValidationError",
-            error_msg=str(exc.errors()),
+        errors = jsonable_encoder(exc.errors())
+        # Surface validation errors in the server log so operators can debug
+        # 422s without inspecting the client response body. Each entry has
+        # `loc` (field path), `type` (error kind), and `msg` (human-readable).
+        summary = "; ".join(
+            f"{'.'.join(str(p) for p in e.get('loc', []))}: {e.get('type')} ({e.get('msg')})"
+            for e in errors
         )
-        return JSONResponse(status_code=422, content={"detail": exc.errors()})
+        logger.warning("validation_error path=%s errors=[%s]", request.url.path, summary)
+        return JSONResponse(status_code=422, content={"detail": errors})
 
     @app.post("/predict", response_model=PredictResponse)
     async def predict(req: PredictRequest, request: Request) -> PredictResponse:
         request_id = request.headers.get("X-Request-Id") or uuid.uuid4().hex
         t0 = time.monotonic_ns()
+        # Bound the per-request log size: proprio is normally 7-14 floats,
+        # but Pydantic doesn't cap the list, so log length + truncated sample
+        # instead of the full vector to keep the log line bounded even if a
+        # caller submits an oversized payload (validation rejects it later).
+        proprio_len = len(req.proprio)
+        proprio_sample = list(req.proprio[:8])
+        logger.info(
+            "predict_request request_id=%s instruction=%r"
+            " proprio_len=%d proprio_head=%s"
+            " image_primary_b64_len=%d image_wrist_b64_len=%s model_version=%s",
+            request_id,
+            req.instruction,
+            proprio_len,
+            proprio_sample,
+            len(req.image_primary),
+            len(req.image_wrist) if req.image_wrist is not None else None,
+            req.model_version,
+        )
         try:
-            obs = adapter.preprocess(req)
-        except Exception as e:  # noqa: BLE001 — invalid input is broad: ValueError, AssertionError,
-            # binascii.Error (bad base64), PIL.UnidentifiedImageError (bad JPEG), etc.
+            scene = decode_jpeg_b64(req.image_primary)
+            wrist_was_provided = req.image_wrist is not None
+            if wrist_was_provided:
+                wrist = decode_jpeg_b64(req.image_wrist)
+            elif wrist_hard_required:
+                raise ValueError(
+                    "checkpoint requires wrist_image but request omitted it"
+                )
+            else:
+                wrist = np.zeros((224, 224, 3), dtype=np.uint8)
+            logger.info(
+                "predict_decoded request_id=%s scene_shape=%s wrist_shape=%s"
+                " wrist_provided=%s",
+                request_id, scene.shape, wrist.shape, wrist_was_provided,
+            )
+
+            proprio_raw = np.asarray(req.proprio, dtype=np.float32)
+            if len(proprio_raw) != len(proprio_stats["q99"]):
+                raise ValueError(
+                    f"proprio length {len(proprio_raw)} != expected "
+                    f"{len(proprio_stats['q99'])}"
+                )
+            proprio_norm, _ = normalize_proprio_q99(proprio_raw, proprio_stats)
+
+            obs = {
+                "scene_image": scene,
+                "wrist_image": wrist,
+                "wrist_was_provided": wrist_was_provided,
+                "proprio": proprio_norm,
+                "language": req.instruction,
+            }
+        except Exception as e:
             elapsed_ms = (time.monotonic_ns() - t0) / 1e6
-            _log_request(
-                request_id, elapsed_ms, state, domain_id,
-                outcome="invalid_request",
-                error_class=type(e).__name__,
-                error_msg=str(e),
+            logger.warning(
+                f"request_invalid request_id={request_id} elapsed_ms={elapsed_ms:.1f}"
+                f" error={type(e).__name__}: {e}"
             )
             raise HTTPException(status_code=422, detail=str(e)) from e
 
-        # Optional injected sleep for slow-path smoke (test-only).
         if state["inject_sleep_s"] > 0:
             import asyncio
             await asyncio.sleep(state["inject_sleep_s"])
 
         try:
             native = predictor.predict(obs)
-        except Exception as e:  # noqa: BLE001 — NotImplementedError (Phase 0 stub) + torch errors
+        except Exception as e:
             elapsed_ms = (time.monotonic_ns() - t0) / 1e6
-            _log_request(
-                request_id, elapsed_ms, state, domain_id,
-                outcome="predictor_error",
-                error_class=type(e).__name__,
-                error_msg=str(e),
+            logger.error(
+                f"predictor_error request_id={request_id} elapsed_ms={elapsed_ms:.1f}"
+                f" error={type(e).__name__}: {e}",
                 exc_info=True,
             )
             raise HTTPException(status_code=500, detail=str(e)) from e
 
-        try:
+        if np.isnan(native).any():
+            elapsed_ms = (time.monotonic_ns() - t0) / 1e6
+            logger.error(
+                f"predictor_nan request_id={request_id} elapsed_ms={elapsed_ms:.1f}"
+            )
+            raise HTTPException(status_code=500, detail="predictor emitted NaN")
+
+        if post_process_fn is not None:
+            try:
+                native = post_process_fn(native, meta)
+            except Exception as e:
+                elapsed_ms = (time.monotonic_ns() - t0) / 1e6
+                logger.error(
+                    f"postprocess_error request_id={request_id} elapsed_ms={elapsed_ms:.1f}"
+                    f" error={type(e).__name__}: {e}",
+                    exc_info=True,
+                )
+                raise HTTPException(status_code=500, detail=f"post_process: {e}") from e
+            if not isinstance(native, np.ndarray) or native.shape[-1] != action_dim:
+                elapsed_ms = (time.monotonic_ns() - t0) / 1e6
+                logger.error(
+                    f"postprocess_bad_shape request_id={request_id} elapsed_ms={elapsed_ms:.1f}"
+                    f" shape={getattr(native, 'shape', None)}"
+                )
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"post_process returned bad shape {getattr(native, 'shape', None)}",
+                )
             if np.isnan(native).any():
-                raise ValueError("predictor emitted NaN before postprocess")
-            actions = adapter.postprocess(native)
-            # Spec-mandated NaN guard on the FINAL response actions
-            # (postprocess can introduce NaN via gripper conversion / denorm).
-            if any(any(_v != _v for _v in row) for row in actions):  # NaN check via != self
-                raise ValueError("postprocess emitted NaN in final actions")
-        except Exception as e:  # noqa: BLE001
-            elapsed_ms = (time.monotonic_ns() - t0) / 1e6
-            _log_request(
-                request_id, elapsed_ms, state, domain_id,
-                outcome="postprocess_error",
-                error_class=type(e).__name__,
-                error_msg=str(e),
-                exc_info=True,
-            )
-            raise HTTPException(status_code=500, detail=str(e)) from e
+                elapsed_ms = (time.monotonic_ns() - t0) / 1e6
+                logger.error(
+                    f"postprocess_nan request_id={request_id} elapsed_ms={elapsed_ms:.1f}"
+                )
+                raise HTTPException(status_code=500, detail="post_process emitted NaN")
 
+        actions = native.astype(np.float32).tolist()
         elapsed_ms = (time.monotonic_ns() - t0) / 1e6
-        _log_request(request_id, elapsed_ms, state, domain_id, outcome="ok",
-                     error_class=None, error_msg=None)
+        logger.info(
+            f"predict ok request_id={request_id} elapsed_ms={elapsed_ms:.1f}"
+        )
         return PredictResponse(actions=actions)
 
     return app
-
-
-def _log_request(
-    request_id: str,
-    elapsed_ms: float,
-    state: dict,
-    domain_id: int,
-    outcome: str,
-    error_class: str | None,
-    error_msg: str | None,
-    *,
-    exc_info: bool = False,
-) -> None:
-    payload = {
-        "ts_ns": time.monotonic_ns(),
-        "request_id": request_id,
-        "elapsed_ms": round(elapsed_ms, 3),
-        "predictor": state["predictor_class"],
-        "domain_id": domain_id,
-        "outcome": outcome,
-    }
-    over_budget = elapsed_ms > _LATENCY_BUDGET_MS
-    if over_budget:
-        payload["latency_budget_ms"] = _LATENCY_BUDGET_MS
-        payload["latency_budget_exceeded"] = True
-    if error_class:
-        payload["error_class"] = error_class
-        payload["error_msg"] = error_msg
-    msg = json.dumps(payload)
-    if outcome in ("predictor_error", "postprocess_error"):
-        # Spec §6: 500 paths get error-level + full traceback (exc_info=True
-        # forwards the active exception to the handler).
-        logger.error(msg, exc_info=exc_info)
-    elif outcome == "invalid_request" or over_budget:
-        logger.warning(msg)
-    else:
-        logger.info(msg)
