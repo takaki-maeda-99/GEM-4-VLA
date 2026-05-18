@@ -27,7 +27,7 @@
 # Use --main_process_port 29501 to avoid colliding with v45's port 29500.
 #
 # Launch:
-#   cd /misc/dl00/takaki/X-VLA-Adapter
+#   cd /misc/dl00/takaki/GEM-4-VLA
 #   mkdir -p outputs/libero_spatial_v43_step20k_ft
 #   MALLOC_ARENA_MAX=2 MALLOC_TRIM_THRESHOLD_=0 \
 #   CUDA_VISIBLE_DEVICES=4,5,6,7 \

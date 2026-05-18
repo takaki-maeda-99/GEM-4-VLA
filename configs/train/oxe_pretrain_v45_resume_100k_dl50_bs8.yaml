@@ -16,7 +16,7 @@
 # Hardware: dl50 GPU 0-3 (NUMA0, 4x RTX 6000 Ada 49GB).
 #
 # Launch:
-#   cd /misc/dl00/takaki/X-VLA-Adapter
+#   cd /misc/dl00/takaki/GEM-4-VLA
 #   MALLOC_ARENA_MAX=2 MALLOC_TRIM_THRESHOLD_=0 \
 #   CUDA_VISIBLE_DEVICES=0,1,2,3 \
 #   nohup .venv/bin/accelerate launch \

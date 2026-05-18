@@ -26,15 +26,15 @@
 # Launch (gemma4 venv required for transformers 5.5.4 + tf, 2-GPU bs=16 like
 # baseline):
 #   CUDA_VISIBLE_DEVICES=3,4 \
-#   PYTHONPATH=/misc/dl00/takaki/X-VLA-Adapter/src:\
+#   PYTHONPATH=/misc/dl00/takaki/GEM-4-VLA/src:\
 #     /misc/dl00/takaki/vla-gemma-4/VLA-Adapter:\
 #     /misc/dl00/takaki/vla-gemma-4 \
 #   /misc/dl00/takaki/vla-gemma-4/.venv-gemma4/bin/python \
 #     -m accelerate.commands.launch \
 #     --num_processes 2 --num_machines 1 --multi_gpu --mixed_precision no \
 #     --main_process_port 29510 \
-#     /misc/dl00/takaki/X-VLA-Adapter/scripts/train.py \
-#     /misc/dl00/takaki/X-VLA-Adapter/configs/train/libero_spatial_v24.yaml
+#     /misc/dl00/takaki/GEM-4-VLA/scripts/train.py \
+#     /misc/dl00/takaki/GEM-4-VLA/configs/train/libero_spatial_v24.yaml
 seed: 0
 model:
   num_domains: 1

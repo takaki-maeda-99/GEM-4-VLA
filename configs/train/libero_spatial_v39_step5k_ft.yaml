@@ -23,7 +23,7 @@
 # default port 29500. Same MALLOC_ARENA_MAX=2 host-RAM mitigation.
 #
 # Launch (after v39 step_5000 ckpt lands):
-#   cd /misc/dl00/takaki/X-VLA-Adapter
+#   cd /misc/dl00/takaki/GEM-4-VLA
 #   mkdir -p outputs/libero_spatial_v39_step5k_ft
 #   MALLOC_ARENA_MAX=2 MALLOC_TRIM_THRESHOLD_=0 \
 #   CUDA_VISIBLE_DEVICES=4,5,6,7 \

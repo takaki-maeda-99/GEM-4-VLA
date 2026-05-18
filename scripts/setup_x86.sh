@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# X-VLA-Adapter x86_64 training/research environment setup.
+# GEM-4-VLA x86_64 training/research environment setup.
 # Usage:  bash scripts/setup_x86.sh         (run from repo root)
 #
 # Targets x86_64 Linux hosts with CUDA driver >= 12.6 (cu128 wheels).

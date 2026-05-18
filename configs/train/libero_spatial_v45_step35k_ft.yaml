@@ -23,7 +23,7 @@
 #
 # Launch:
 #   ssh dl42
-#   cd /misc/dl00/takaki/X-VLA-Adapter
+#   cd /misc/dl00/takaki/GEM-4-VLA
 #   mkdir -p outputs/libero_spatial_v45_step35k_ft
 #   MALLOC_ARENA_MAX=2 MALLOC_TRIM_THRESHOLD_=0 \
 #   CUDA_VISIBLE_DEVICES=3 \

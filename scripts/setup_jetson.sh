@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# X-VLA-Adapter Jetson Orin deploy environment setup.
+# GEM-4-VLA Jetson Orin deploy environment setup.
 # Usage:  bash scripts/setup_jetson.sh         (run from repo root)
 #
 # Targets Jetson Orin (aarch64, sm_87) running JetPack 6.2.x / CUDA 12.6.

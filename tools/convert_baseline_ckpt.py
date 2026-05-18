@@ -16,7 +16,7 @@ Mapping (baseline → ours):
 
 Run via the gemma4 venv (the baseline ckpt was saved with transformers 5.x):
 
-    PYTHONPATH=/misc/dl00/takaki/X-VLA-Adapter/src \\
+    PYTHONPATH=/misc/dl00/takaki/GEM-4-VLA/src \\
     /misc/dl00/takaki/vla-gemma-4/.venv-gemma4/bin/python \\
         tools/convert_baseline_ckpt.py <baseline.pt> <out_dir>
 

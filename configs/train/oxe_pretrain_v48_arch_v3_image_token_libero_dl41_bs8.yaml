@@ -31,7 +31,7 @@
 # Launch with --main_process_port 29501 (kondo's OSGNet uses 29500 on dl50 GPU 0-3).
 #
 # Launch:
-#   cd /misc/dl00/takaki/X-VLA-Adapter
+#   cd /misc/dl00/takaki/GEM-4-VLA
 #   mkdir -p outputs/oxe_pretrain_v48_arch_v3_image_token_libero_dl41_bs8
 #   MALLOC_ARENA_MAX=2 MALLOC_TRIM_THRESHOLD_=0 \
 #   CUDA_VISIBLE_DEVICES=4,5,6,7 \

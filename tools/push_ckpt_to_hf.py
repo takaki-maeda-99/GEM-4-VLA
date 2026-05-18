@@ -1,4 +1,4 @@
-"""Upload an X-VLA-Adapter checkpoint directory to HuggingFace Hub.
+"""Upload an GEM-4-VLA checkpoint directory to HuggingFace Hub.
 
 Usage:
   # 1) preview only (lists files + sizes, doesn't upload)

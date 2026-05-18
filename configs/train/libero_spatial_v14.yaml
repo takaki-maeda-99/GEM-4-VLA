@@ -3,7 +3,7 @@
 #
 # Discovered another diff: vla-gemma-4 73% baseline trained with PyTorch
 # default AdamW betas (0.9, 0.999) — finetune_gemma4.py:1031 calls
-# AdamW(param_groups, fused=...) with NO betas arg. Our X-VLA-Adapter
+# AdamW(param_groups, fused=...) with NO betas arg. Our GEM-4-VLA
 # was hardcoded to betas=(0.9, 0.95) (the X-VLA Stage 3 pretrain
 # convention). Different beta2 timescale; (0.95) accumulates variance
 # over a 20-step window, (0.999) over 1000 steps. The aggressive 0.95

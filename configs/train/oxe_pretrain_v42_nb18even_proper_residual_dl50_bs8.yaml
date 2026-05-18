@@ -29,7 +29,7 @@
 # launching v42, OR launch v42 on GPU 4-7 once v41 completes.
 #
 # Launch (after killing v41):
-#   cd /misc/dl00/takaki/X-VLA-Adapter
+#   cd /misc/dl00/takaki/GEM-4-VLA
 #   mkdir -p outputs/oxe_pretrain_v42_nb18even_proper_residual_dl50_bs8
 #   MALLOC_ARENA_MAX=2 MALLOC_TRIM_THRESHOLD_=0 \
 #   CUDA_VISIBLE_DEVICES=0,1,2,3 \

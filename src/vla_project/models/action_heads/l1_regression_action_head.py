@@ -46,7 +46,7 @@ class L1RegressionActionHead(nn.Module):
         # ``output_action_dim=True`` matches the vla-gemma-4 baseline where
         # ``action_head.model.fc2`` directly outputs ``action_dim`` and there
         # is no external action_decoder. Default False keeps the legacy
-        # X-VLA-Adapter shape (head outputs hidden_dim, an external
+        # GEM-4-VLA shape (head outputs hidden_dim, an external
         # ``action_decoder`` projects to action_dim).
         out_dim = action_dim if output_action_dim else hidden_dim
         self.model = MLPResNet(

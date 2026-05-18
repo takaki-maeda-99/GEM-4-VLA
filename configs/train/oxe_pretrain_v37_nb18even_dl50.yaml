@@ -17,10 +17,10 @@
 # the 6-min recompile once.
 #
 # Launch (use nohup so the OS owns the process, not the launching shell):
-#   cd /misc/dl00/takaki/X-VLA-Adapter
+#   cd /misc/dl00/takaki/GEM-4-VLA
 #   CUDA_VISIBLE_DEVICES=0,1,2,3 \
-#   PYTHONPATH=/misc/dl00/takaki/X-VLA-Adapter/src \
-#   nohup /misc/dl00/takaki/X-VLA-Adapter/.venv/bin/accelerate launch \
+#   PYTHONPATH=/misc/dl00/takaki/GEM-4-VLA/src \
+#   nohup /misc/dl00/takaki/GEM-4-VLA/.venv/bin/accelerate launch \
 #     --config_file configs/accelerate/dl50_4gpu.yaml \
 #     scripts/train.py configs/train/oxe_pretrain_v37_nb18even_dl50.yaml \
 #     > outputs/oxe_pretrain_v37_nb18even_dl50/launch.log 2>&1 &

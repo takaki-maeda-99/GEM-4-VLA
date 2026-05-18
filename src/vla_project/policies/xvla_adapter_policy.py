@@ -1,4 +1,4 @@
-"""Concrete runtime policy for X-VLA-Adapter.
+"""Concrete runtime policy for GEM-4-VLA.
 
 Wraps a trained VLAPolicy + tokenizer + image transform + Q99Stats and
 exposes ``select_action(obs)`` that:

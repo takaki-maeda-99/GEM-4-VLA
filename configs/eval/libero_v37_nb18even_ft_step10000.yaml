@@ -6,9 +6,9 @@
 # pretrain (num_blocks=18 + action_head_layer_mode=even).
 #
 # Run on dl42 (4× A6000 50GB; /misc/dl00 NFS-mounted, venv reusable):
-#   cd /misc/dl00/takaki/X-VLA-Adapter
+#   cd /misc/dl00/takaki/GEM-4-VLA
 #   CUDA_VISIBLE_DEVICES=0 \
-#     PYTHONPATH=/misc/dl00/takaki/X-VLA-Adapter/src \
+#     PYTHONPATH=/misc/dl00/takaki/GEM-4-VLA/src \
 #     .venv/bin/python scripts/eval.py \
 #     configs/eval/libero_v37_nb18even_ft_step10000.yaml \
 #     2>&1 | tee outputs/libero_spatial_v37_nb18even_ft/eval_step10000.log

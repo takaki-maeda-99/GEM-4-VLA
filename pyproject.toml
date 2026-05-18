@@ -1,7 +1,7 @@
 [project]
 name = "vla_project"
 version = "0.0.1"
-description = "X-VLA-Adapter: Gemma4 + SigLIP + per-domain VLA-Adapter head"
+description = "GEM-4-VLA: Gemma4 + SigLIP + per-domain VLA-Adapter head"
 # Both target environments (envs/x86, envs/jetson) currently require Python 3.10.
 # x86 cu128 wheels also ship for 3.11, but the Jetson jetson-ai-lab index only
 # publishes cp310 wheels, so we constrain the whole project to 3.10 for parity.

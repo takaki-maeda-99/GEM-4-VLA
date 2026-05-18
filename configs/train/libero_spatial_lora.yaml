@@ -39,7 +39,7 @@ train:
   freeze_steps: 1000
   warmup_steps: 2000
   min_lr_ratio: 1.0            # no cosine decay; flat peak after warmup
-  lr_coefs:                    # X-VLA-Adapter convention; matches optim.py defaults
+  lr_coefs:                    # GEM-4-VLA convention; matches optim.py defaults
     gemma_lora:     0.1
     siglip:         0.1
     soft_prompts:   0.1

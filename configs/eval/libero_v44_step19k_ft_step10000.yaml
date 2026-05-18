@@ -14,9 +14,9 @@
 #   - num_domains: 10 (9 OXE + LIBERO row 9), domain_id: 9
 #
 # Run on dl40 GPU 2 (A100 40GB; EGL verified working 2026-05-12):
-#   cd /misc/dl00/takaki/X-VLA-Adapter
+#   cd /misc/dl00/takaki/GEM-4-VLA
 #   CUDA_VISIBLE_DEVICES=2 MUJOCO_GL=egl PYOPENGL_PLATFORM=egl \
-#     PYTHONPATH=/misc/dl00/takaki/X-VLA-Adapter/src \
+#     PYTHONPATH=/misc/dl00/takaki/GEM-4-VLA/src \
 #     nohup .venv/bin/python scripts/eval.py \
 #     configs/eval/libero_v44_step19k_ft_step10000.yaml \
 #     > outputs/libero_spatial_v44_step19k_ft/eval_step10000.log 2>&1 &

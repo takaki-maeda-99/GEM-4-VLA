@@ -24,11 +24,11 @@
 #
 # Launch (gemma4 venv, single-GPU dl40 GPU 0):
 #   CUDA_VISIBLE_DEVICES=0 \
-#   PYTHONPATH=/misc/dl00/takaki/X-VLA-Adapter/src:\
+#   PYTHONPATH=/misc/dl00/takaki/GEM-4-VLA/src:\
 #     /misc/dl00/takaki/vla-gemma-4/VLA-Adapter:\
 #     /misc/dl00/takaki/vla-gemma-4 \
 #   /misc/dl00/takaki/vla-gemma-4/.venv-gemma4/bin/python scripts/train.py \
-#     /misc/dl00/takaki/X-VLA-Adapter/configs/train/libero_spatial_v30.yaml
+#     /misc/dl00/takaki/GEM-4-VLA/configs/train/libero_spatial_v30.yaml
 seed: 0
 model:
   num_domains: 1

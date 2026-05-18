@@ -1,6 +1,6 @@
 # `vla_project.deployment` — VLA Inference HTTP Server
 
-Hosts an X-VLA-Adapter checkpoint behind MimicRec's `POST /predict` contract.
+Hosts an GEM-4-VLA checkpoint behind MimicRec's `POST /predict` contract.
 
 The server returns **model-native, fully q99-denormalized action chunks** with optional per-checkpoint `post_process.py` applied. Contract translation (frame conversion, gripper convention mapping, raw proprio adaptation) is the client's responsibility.
 

@@ -11,7 +11,7 @@ def _trainable(params):
     return [p for p in params if p.requires_grad]
 
 
-# Default per-group LR multipliers (X-VLA-Adapter convention).
+# Default per-group LR multipliers (GEM-4-VLA convention).
 #   - SigLIP / Gemma backbone: 0.1 × base_lr  (when unfrozen / LoRA)
 #   - SoftPrompt:              0.1 × base_lr
 #   - Bridge / ActionQuery:    1.0 × base_lr

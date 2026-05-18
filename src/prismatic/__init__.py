@@ -1,4 +1,4 @@
-# X-VLA-Adapter vendored slimming: keep this file empty so importing
+# GEM-4-VLA vendored slimming: keep this file empty so importing
 # ``prismatic.vla.datasets.rlds.*`` does not eagerly evaluate
 # ``prismatic.models.*`` (which would require timm + draccus + jsonlines
 # + json_numpy + rich + ... — none of which v37's RLDS data path needs).

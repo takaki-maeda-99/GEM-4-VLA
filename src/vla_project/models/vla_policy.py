@@ -200,7 +200,7 @@ class VLAPolicyConfig:
     #                      (per-domain × 2-layer, X-VLA style with extra capacity)
     #     - "shared_3mlp": single 3-layer MLP shared across domains
     #                      (= use_baseline_projectors=True path)
-    #     - "shared_da_linear": single 1-layer DA-Linear (legacy X-VLA-Adapter
+    #     - "shared_da_linear": single 1-layer DA-Linear (legacy GEM-4-VLA
     #                          path; default for backward compat)
     #   - ``proj_hidden_dim``: hidden width for da_2layer (default = hidden_dim)
     #   - ``soft_prompt_in_llm``: when True, soft_prompt_hub output is scattered

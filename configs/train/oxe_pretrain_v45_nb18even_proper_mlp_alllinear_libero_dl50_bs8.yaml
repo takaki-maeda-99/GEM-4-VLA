@@ -26,7 +26,7 @@
 #   stage3_openx/libero_spatial_no_noops -> modified_libero_rlds/libero_spatial_no_noops
 #
 # Launch:
-#   cd /misc/dl00/takaki/X-VLA-Adapter
+#   cd /misc/dl00/takaki/GEM-4-VLA
 #   mkdir -p outputs/oxe_pretrain_v45_nb18even_proper_mlp_alllinear_libero_dl50_bs8
 #   MALLOC_ARENA_MAX=2 MALLOC_TRIM_THRESHOLD_=0 \
 #   CUDA_VISIBLE_DEVICES=0,1,2,3 \
