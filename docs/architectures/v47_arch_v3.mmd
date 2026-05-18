@@ -1,0 +1,126 @@
+%%{init: {"flowchart": {"htmlLabels": true, "curve": "linear"}, "themeVariables": {"fontSize": "14px"}}}%%
+graph TD
+    %% =====================================================================
+    %% V47 arch v3 — OXE+LIBERO 13-domain pretrain, fresh from scratch.
+    %% Invariant: every LLM-scattered token (scene/wrist/proprio/soft_prompt
+    %% /action/prompt) is sliced back into the action head's cross-attn.
+    %% Self-attn pool inside the head sees x ONLY.
+    %% Source: src/vla_project/models/vla_policy.py:781-1060
+    %%         src/vla_project/data/packing/input_packer.py:128-210
+    %%         src/vla_project/models/action_heads/mlp_resnet_block_pro.py
+    %% =====================================================================
+
+    %% ============= INPUTS =============
+    subgraph Inputs["📥 Inputs (single sample, batch packed downstream)"]
+        SCENE["scene_image<br/>(3, 224, 224) bf16 SigLIP-norm"]
+        WRIST["wrist_image<br/>(3, 224, 224) bf16 SigLIP-norm<br/>+ wrist_mask (B,) bool"]
+        PROMPT["task instruction<br/>str (natural language)"]
+        PROPRIO["proprio<br/>(8,) bf16 q01/q99 normalized"]
+        DOMAIN_ID["domain_id ∈ {0..12}<br/>OXE 0..8, LIBERO 10/goal/object/spatial 9..12"]
+    end
+
+    %% ============= VISION (FROZEN) =============
+    subgraph Vision["🔒 Vision encoder (frozen, scene+wrist share)"]
+        SIGLIP["SigLIP-So400m timm<br/>vit_so400m_patch14_siglip_224.v2_webli<br/>27 blocks · embed=1152"]
+    end
+    SCENE --> SIGLIP
+    WRIST --> SIGLIP
+    SIGLIP --> SCENE_TOK["scene_tok<br/>(B, 256, 1152)"]
+    SIGLIP --> WRIST_TOK["wrist_tok<br/>(B, 256, 1152)"]
+
+    %% ============= ABOVE-LLM PROJECTORS =============
+    subgraph AboveLLM["🔥 Above-LLM (per-domain DA-2-MLP)"]
+        SCENE_PROJ["scene_proj<br/>DA-2-MLP 1152→1536→1536, GELU<br/>13 rows · ~54 M params"]
+        WRIST_PROJ["wrist_proj<br/>DA-2-MLP 1152→1536→1536, GELU<br/>13 rows · ~54 M params"]
+        PROP_PROJ["proprio_proj<br/>DA-2-MLP 8→1536→1536, GELU<br/>13 rows · ~31 M params"]
+        AQ["action_query_hub.queries<br/>shared (64, 1536), zero-init<br/>~98 K params"]
+        SP_HUB["soft_prompt_hub<br/>nn.Embedding(13, 32×1536)<br/>~639 K params"]
+    end
+
+    SCENE_TOK --> SCENE_PROJ
+    WRIST_TOK --> WRIST_PROJ
+    PROPRIO --> PROP_PROJ
+    DOMAIN_ID --> SCENE_PROJ
+    DOMAIN_ID --> WRIST_PROJ
+    DOMAIN_ID --> PROP_PROJ
+    DOMAIN_ID --> SP_HUB
+
+    SCENE_PROJ --> SCENE_E["scene_e<br/>(B, 256, 1536)"]
+    WRIST_PROJ --> WRIST_E["wrist_e<br/>(B, 256, 1536)"]
+    PROP_PROJ --> PROP_E["proprio_e<br/>(B, 1, 1536)"]
+    AQ --> ACTION_E["action_q_e<br/>(B, 64, 1536) zeros"]
+    SP_HUB --> SOFT_E["soft_e<br/>(B, 32, 1536)"]
+
+    %% ============= LLM INPUT BUILD =============
+    PROMPT --> TOK["GemmaPromptTokenizer<br/>max_len=20"]
+    TOK --> PROMPT_IDS["prompt_input_ids<br/>(B, 20) long<br/>+ prompt_attention_mask"]
+
+    subgraph InputPack["InputPacker (after_vision)"]
+        IP["LLM input ids layout (L=631):<br/>[BOS] [soft_prompt(32)] [scene(256)] [prompt(20)]<br/>[wrist(256)] [proprio(1)] [action(64)] [EOS]<br/>placeholder id ranges:<br/>· scene 258949..259204 (unused_range)<br/>· soft_prompt 259462..259493<br/>· wrist 259494..259749<br/>· proprio PROPRIO_PLACEHOLDER_IDX<br/>· action 258885..258948"]
+    end
+    PROMPT_IDS --> IP
+
+    %% ============= LLM =============
+    subgraph LLM["🧊+🔥 Gemma-4 E2B (frozen base + LoRA r=64 α=128)"]
+        EMBED["gemma.embed_tokens<br/>(L=631, 1536)"]
+        SCATTER["scatter_into_embeds:<br/>· soft_e   @ idx['soft_prompt']<br/>· scene_e  @ idx['scene']<br/>· wrist_e × wrist_mask  @ idx['wrist']<br/>  (modality dropout p=0.2 at train)<br/>· proprio_e @ idx['proprio']<br/>· action_q_e @ idx['action']<br/>(prompt tokens stay as embed_tokens output)"]
+        GEMMA["Gemma4TextModel · 35 layers<br/>LoRA targets: q/k/v/o/gate/up/down<br/>attention_mask = all-ones (matches 73% baseline)"]
+        HS["hidden_states tuple<br/>(B, 36, 631, 1536)"]
+    end
+
+    IP --> EMBED
+    EMBED --> SCATTER
+    SOFT_E --> SCATTER
+    SCENE_E --> SCATTER
+    WRIST_E --> SCATTER
+    PROP_E --> SCATTER
+    ACTION_E --> SCATTER
+    SCATTER --> GEMMA
+    GEMMA --> HS
+
+    %% ============= PER-LAYER SLICE (even tap, 18 layers) =============
+    subgraph Slice["📐 Per-layer slice (even tap → 18 of 35 layers, +1 prepend = 19)"]
+        SLICE_HA["h_a (action slots)<br/>(B, 19, 64, 1536)"]
+        SLICE_HT["h_t = concat over token dim of:<br/>scene(256) ‖ wrist(256) ‖ proprio(1) ‖ prompt(20)<br/>= (B, 19, 533, 1536)"]
+        SLICE_HTM["h_t_mask (B, 533) bool<br/>1 over scene/wrist/proprio, prompt_attention_mask over prompt<br/>(masks padded prompt positions at cross-attn softmax)"]
+        SLICE_HSP["h_sp_per_layer (soft_prompt slots)<br/>(B, 19, 32, 1536)"]
+    end
+    HS --> SLICE_HA
+    HS --> SLICE_HT
+    HS --> SLICE_HSP
+    PROMPT_IDS -.attn_mask.-> SLICE_HTM
+
+    %% ============= ACTION HEAD =============
+    subgraph ActionHead["🔥 MLPResNet head · 18 × MLPResNetBlock_Pro (no warmup, ungated, LayerScale 1e-4)"]
+        X_INIT["x_init = zeros(B, T=8, A×D=10752)<br/>+ 0.02·randn (train only)"]
+        FC1["LN(10752) + fc1(10752→1536) + ReLU<br/>→ (B, 8, 1536)"]
+        BLOCK["block_i (× 18) MLPResNetBlock_Pro<br/>self-attn:    q,k_self,v_self  ← x  (pool = x ONLY)<br/>cross-attn1: k_adapter/v_adapter ← h_a[:, i+1]    (64 tokens)<br/>cross-attn2: k_task/v_task       ← h_t[:, i+1]    (533 tokens, h_t_mask)<br/>cross-attn3: k_soft_prompt/v_soft_prompt ← h_sp_per_layer[:, i+1] (32 tokens)<br/>RoPE on q + each k_*<br/>ungated_streams=True (no tanh gates)<br/>o_proj → + residual ×LayerScale(1e-4)<br/>FFN: LN + Linear D→D + ReLU + Linear D→D (proper_mlp)<br/>+ residual × LayerScale(1e-4)"]
+        OUT["out_proj fc2<br/>(B, 8, 1536)"]
+        ACT_DEC["action_decoder<br/>DA-2-MLP 1536→1536→7 · 13 rows"]
+    end
+
+    X_INIT --> FC1 --> BLOCK --> OUT --> ACT_DEC
+    SLICE_HA --> BLOCK
+    SLICE_HT --> BLOCK
+    SLICE_HTM --> BLOCK
+    SLICE_HSP --> BLOCK
+    DOMAIN_ID --> ACT_DEC
+
+    %% Legacy paths DISABLED (arch v3 invariant)
+    DEAD["legacy_external_in_self_pool=False<br/>⇒ h_w=None, h_sp=None, p=None<br/>(no wrist / soft_prompt / proprio in self-attn pool)"]:::dead
+    BLOCK -.suppressed.-> DEAD
+
+    %% ============= OUTPUT =============
+    ACT_DEC --> PRED["pred action chunk<br/>(B, 8, 7) per-domain q01/q99 normalized"]
+    PRED --> LOSS["F.l1_loss(pred, target_action)<br/>masked by action_mask"]
+
+    %% ============= STYLES =============
+    classDef frozen   fill:#cfe5ff,stroke:#1e6091,color:#0a1f33
+    classDef trainable fill:#ffe6a8,stroke:#a36b00,color:#3b2700
+    classDef io       fill:#dfe7df,stroke:#3a6a3a,color:#1a3a1a
+    classDef tensor   fill:#f5f5f5,stroke:#666,color:#222
+    classDef dead     fill:#f3d2d2,stroke:#a23a3a,color:#3a0a0a
+    class SIGLIP,Vision,EMBED,GEMMA frozen
+    class SCENE_PROJ,WRIST_PROJ,PROP_PROJ,AQ,SP_HUB,BLOCK,FC1,OUT,ACT_DEC trainable
+    class SCENE,WRIST,PROMPT,PROPRIO,DOMAIN_ID,LOSS,PRED io
+    class SCENE_TOK,WRIST_TOK,SCENE_E,WRIST_E,PROP_E,ACTION_E,SOFT_E,PROMPT_IDS,IP,HS,SLICE_HA,SLICE_HT,SLICE_HTM,SLICE_HSP,X_INIT,SCATTER tensor

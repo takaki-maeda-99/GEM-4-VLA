@@ -246,6 +246,34 @@ class VLAPolicyConfig:
     # Forces ``include_proprio_placeholder=True`` (the slot must exist in the
     # input layout for the scatter target).
     proprio_in_llm: bool = False
+    # v47 (arch_v2): slice the prompt token positions out of Gemma's per-layer
+    # hidden states and concat them into ``h_t`` so prompt features feed the
+    # action_head's task cross-attn directly. Without this, language only
+    # influences the head via Gemma's internal attention mixing it into scene/
+    # wrist hidden states — which the v45 occlusion test showed has near-zero
+    # effective contribution. Padded prompt positions are gated out via
+    # ``h_t_mask`` (built from prompt_attention_mask) inside the block so they
+    # don't inject Gemma's pad-position hidden state (undefined/noisy) into
+    # k_task / v_task softmax.
+    prompt_in_task_stream: bool = False
+    # arch v3: slice proprio's per-layer LLM hidden into ``h_t`` (instead of
+    # silently discarding it under proprio_in_llm=True). Requires
+    # proprio_in_llm=True so the proprio_proj output is actually present in
+    # the LLM input at the proprio placeholder slot.
+    proprio_in_task_stream: bool = False
+    # arch v3: feed soft_prompt's per-layer LLM hidden into a NEW independent
+    # cross-attn stream (k_soft_prompt / v_soft_prompt added per block).
+    # Mirrors the action_queries pattern (AQ -> Gemma -> h_a -> adapter
+    # cross-attn). Replaces the legacy h_sp self-attn-pool concat path.
+    # Requires soft_prompt_in_llm=True + use_soft_prompt=True.
+    soft_prompt_as_cross_attn_stream: bool = False
+    # arch v3 invariant: when False, the legacy ``h_w`` / ``h_sp`` self-attn
+    # pool concat path inside MLPResNet is forcibly disabled (vla_policy
+    # always passes h_w=None / h_sp=None). Set True (default) for v25/v33/v45
+    # backward compat; set False for arch v3 fresh pretrain configs to enforce
+    # "self-attn pool = x only" and route all external memory through cross-
+    # attn streams (h_a / h_t / h_sp_per_layer).
+    legacy_external_in_self_pool: bool = True
 
     def __post_init__(self) -> None:
         # Backwards-compat: legacy ``freeze_llm_and_aq=True`` activates both
@@ -336,6 +364,66 @@ class VLAPolicyConfig:
                 "layer_scale_init > 0 requires use_proper_residual=True (the legacy "
                 "path doesn't apply a residual branch to scale)."
             )
+        # arch v3 invariants (per-flag + holistic)
+        if self.proprio_in_task_stream and not self.proprio_in_llm:
+            raise ValueError(
+                "proprio_in_task_stream=True requires proprio_in_llm=True; the "
+                "proprio_proj output must be present in the LLM input at the "
+                "proprio placeholder slot before its hidden state can be sliced."
+            )
+        if self.soft_prompt_as_cross_attn_stream and not self.soft_prompt_in_llm:
+            raise ValueError(
+                "soft_prompt_as_cross_attn_stream=True requires soft_prompt_in_llm=True; "
+                "the soft_prompt_hub output must be scattered into the LLM input "
+                "for its per-layer hidden to be sliced into h_sp_per_layer."
+            )
+        if self.soft_prompt_as_cross_attn_stream and not self.use_soft_prompt:
+            raise ValueError(
+                "soft_prompt_as_cross_attn_stream=True requires use_soft_prompt=True"
+            )
+        if self.soft_prompt_as_cross_attn_stream and self.num_soft_prompt_tokens <= 0:
+            raise ValueError(
+                "soft_prompt_as_cross_attn_stream=True requires num_soft_prompt_tokens > 0; "
+                f"got {self.num_soft_prompt_tokens}"
+            )
+        if self.soft_prompt_as_cross_attn_stream and self.wrap_llm_in_no_grad:
+            raise ValueError(
+                "soft_prompt_as_cross_attn_stream=True with wrap_llm_in_no_grad=True "
+                "detaches Gemma hidden states, so soft_prompt_hub (and proprio_proj / "
+                "scene_proj / wrist_proj) cannot receive gradient via the cross-attn "
+                "memory path. Set wrap_llm_in_no_grad=False for arch v3."
+            )
+        # arch v3 holistic invariant: when legacy_external_in_self_pool=False
+        # (the new "self-attn pool = x only" mode), all memory streams must flow
+        # through cross-attn, which requires every external token to be inside
+        # the LLM AND sliced back out. Enforce the full coherent set.
+        if not self.legacy_external_in_self_pool:
+            required = {
+                "wrist_in_llm": self.wrist_in_llm,
+                "proprio_in_llm": self.proprio_in_llm,
+                "soft_prompt_in_llm": self.soft_prompt_in_llm,
+                "proprio_in_task_stream": self.proprio_in_task_stream,
+                "prompt_in_task_stream": self.prompt_in_task_stream,
+                "soft_prompt_as_cross_attn_stream": self.soft_prompt_as_cross_attn_stream,
+            }
+            forbidden = {
+                "wrap_llm_in_no_grad": self.wrap_llm_in_no_grad,
+                "use_wrist_bridge": self.use_wrist_bridge,
+            }
+            mismatched = [n for n, v in required.items() if not v] + [
+                n for n, v in forbidden.items() if v
+            ]
+            if mismatched:
+                raise ValueError(
+                    "legacy_external_in_self_pool=False (arch v3) requires: "
+                    + ", ".join(f"{n}={'True' if n in required else 'False'}"
+                                for n in mismatched)
+                    + ". This invariant ensures every LLM-scattered token "
+                    "(scene/wrist/proprio/soft_prompt/action_queries/prompt) has "
+                    "its Gemma hidden routed back into the action_head via "
+                    "h_a / h_t / h_sp_per_layer cross-attn streams."
+                )
+
         if self.proprio_in_llm and not self.include_proprio_placeholder:
             raise ValueError(
                 "proprio_in_llm=True requires include_proprio_placeholder=True; "
@@ -595,13 +683,17 @@ class VLAPolicy(nn.Module):
             num_wrist_tokens_in_llm=self._llm_wrist_tokens,
         )
 
-        # h_t feeds the head from scene LLM-positions only (line 207 slice via
-        # packed.idx["scene"]). Wrist + soft prompt enter the head via the
-        # self-attn pool concat (h_w / h_sp), not as task tokens. So
-        # num_task_tokens = num_scene_tokens.
-        # When wrist_in_llm=True, the task stream concatenates scene + wrist
-        # LLM hidden states, so num_task_tokens grows accordingly.
+        # h_t feeds the head from LLM-positions of scene (+ optional wrist /
+        # proprio / prompt depending on arch-v3 flags). Wrist + soft prompt
+        # legacy concat (h_w / h_sp self-attn pool) are still counted only by
+        # their cross-attn-stream membership: wrist goes into h_t when
+        # wrist_in_llm=True, soft_prompt goes into its own independent
+        # cross-attn stream (h_sp_per_layer) under arch v3.
         action_head_task_tokens = llm_vision_tokens + self._llm_wrist_tokens
+        if cfg.proprio_in_task_stream:
+            action_head_task_tokens += 1                              # arch v3 +proprio
+        if cfg.prompt_in_task_stream:
+            action_head_task_tokens += cfg.prompt_max_len             # arch v3 +prompt (pad masked)
         self.action_head = L1RegressionActionHead(
             hidden_dim=D,
             action_dim=A,
@@ -618,6 +710,7 @@ class VLAPolicy(nn.Module):
             layer_scale_init=cfg.layer_scale_init,
             mlp_ratio=cfg.mlp_ratio,
             output_action_dim=cfg.action_head_outputs_actions,
+            use_soft_prompt_cross_attn=cfg.soft_prompt_as_cross_attn_stream,
         )
 
         # Wrist bridge projector: single Linear(siglip_dim → llm_dim) shared
@@ -855,24 +948,62 @@ class VLAPolicy(nn.Module):
         )
         h_a_selected = selected_hs[bs, layers, packed.idx["action"].unsqueeze(1)]
         h_t_selected = selected_hs[bs, layers, packed.idx["scene"].unsqueeze(1)]
+        # Per-piece mask for h_t. scene/wrist/proprio are always-valid tokens;
+        # prompt is variable-length with prompt_attention_mask. We collect 1.0
+        # masks per piece and concat at the end into h_t_mask (B, K_t). The
+        # mask is only used when prompt_in_task_stream=True (the only stream
+        # piece with real pad); otherwise we pass h_t_mask=None to the head.
+        mask_pieces = [torch.ones(B, h_t_selected.shape[2],
+                                  dtype=torch.bool, device=hs.device)]
         # v36: when wrist_in_llm=True, the action head's task stream attends to
         # both scene AND wrist hidden states. Concatenate the slices along the
         # token dim so num_task_tokens matches the head's allocated K_t.
         if self.cfg.wrist_in_llm and "wrist" in packed.idx:
             h_w_selected = selected_hs[bs, layers, packed.idx["wrist"].unsqueeze(1)]
             h_t_selected = torch.cat([h_t_selected, h_w_selected], dim=2)
+            mask_pieces.append(torch.ones(B, h_w_selected.shape[2],
+                                          dtype=torch.bool, device=hs.device))
+        # arch v3: slice proprio LLM hidden into h_t (replaces the legacy
+        # discarded path under proprio_in_llm=True).
+        if self.cfg.proprio_in_task_stream and "proprio" in packed.idx:
+            h_pr_selected = selected_hs[bs, layers, packed.idx["proprio"].unsqueeze(1)]
+            h_t_selected = torch.cat([h_t_selected, h_pr_selected], dim=2)
+            mask_pieces.append(torch.ones(B, h_pr_selected.shape[2],
+                                          dtype=torch.bool, device=hs.device))
+        # arch v2/v3: slice prompt LLM hidden into h_t with pad mask via h_t_mask.
+        # Padded prompt token positions in Gemma's output hidden are masked OUT
+        # at the action_head cross-attn softmax (see MLPResNetBlock_Pro.forward).
+        if self.cfg.prompt_in_task_stream and "prompt" in packed.idx:
+            h_p_selected = selected_hs[bs, layers, packed.idx["prompt"].unsqueeze(1)]
+            h_t_selected = torch.cat([h_t_selected, h_p_selected], dim=2)
+            mask_pieces.append(batch["prompt_attention_mask"].bool())
+        h_t_mask = torch.cat(mask_pieces, dim=1) if self.cfg.prompt_in_task_stream else None
+        # arch v3: slice soft_prompt LLM hidden into independent cross-attn
+        # stream h_sp_per_layer (AQ pattern). Requires soft_prompt_in_llm=True
+        # (so soft_prompt_hub output is actually scattered into the LLM input).
+        if self.cfg.soft_prompt_as_cross_attn_stream and "soft_prompt" in packed.idx:
+            h_sp_selected = selected_hs[bs, layers, packed.idx["soft_prompt"].unsqueeze(1)]
+            h_sp_per_layer = torch.cat([h_sp_selected[:, :1], h_sp_selected], dim=1)
+        else:
+            h_sp_per_layer = None
         # MLPResNet indexes h_*[:, i + 1] to match the reference's
         # embedding+layers convention, so prepend an unused slot.
         h_a = torch.cat([h_a_selected[:, :1], h_a_selected], dim=1)   # [B, num_blocks+1, Q, D]
-        h_t = torch.cat([h_t_selected[:, :1], h_t_selected], dim=1)   # [B, num_blocks+1, K_scene, D]
-        # v36: when wrist_in_llm=True, the wrist features are scattered into
-        # the LLM emb already. Don't double-feed via the action_head's
-        # self-attn pool — set h_w=None.
-        h_w = None if self.cfg.wrist_in_llm else wrist_e             # [B, K_wrist, D] or None
-        # v33: when soft_prompt_in_llm=True, the soft prompt is consumed by the
-        # LLM (scattered into emb above). Don't double-feed it to the action
-        # head's self-attn pool.
-        h_sp = None if self.cfg.soft_prompt_in_llm else soft_e        # [B, K_soft, D] or None
+        h_t = torch.cat([h_t_selected[:, :1], h_t_selected], dim=1)   # [B, num_blocks+1, K_t, D]
+        # legacy h_w / h_sp self-attn pool concat (v25/v33/v45 path). arch v3
+        # disables this by forcing both to None via legacy_external_in_self_pool=False.
+        if not self.cfg.legacy_external_in_self_pool:
+            h_w = None
+            h_sp = None
+        else:
+            # v36: when wrist_in_llm=True, the wrist features are scattered into
+            # the LLM emb already. Don't double-feed via the action_head's
+            # self-attn pool — set h_w=None.
+            h_w = None if self.cfg.wrist_in_llm else wrist_e         # [B, K_wrist, D] or None
+            # v33: when soft_prompt_in_llm=True, the soft prompt is consumed by the
+            # LLM (scattered into emb above). Don't double-feed it to the action
+            # head's self-attn pool.
+            h_sp = None if self.cfg.soft_prompt_in_llm else soft_e    # [B, K_soft, D] or None
 
         # 7. x init = zeros (Bridge match) + train-time gaussian noise.
         # Reference (action_heads.py:14-17, 80-83) adds N(0, 0.02²) noise
@@ -903,9 +1034,17 @@ class VLAPolicy(nn.Module):
             p = proprio_e
         else:
             p = self.proprio_proj(batch["proprio"], domain_id).unsqueeze(1)
+        # arch v3: legacy_external_in_self_pool=False forces p=None too. The
+        # proprio cross-attn signal flows through h_t via proprio_in_task_stream
+        # (sliced from Gemma per-layer hidden), so the legacy concat-to-adapter
+        # path is unused.
+        if not self.cfg.legacy_external_in_self_pool:
+            p = None
 
         # 9. action head (policy dtype throughout). h_w + h_sp join the
-        # self-attn pool (concat to x post-fc1, trimmed back after blocks).
+        # self-attn pool (concat to x post-fc1, trimmed back after blocks)
+        # only under legacy_external_in_self_pool=True (v25/v33/v45). arch v3
+        # forces them None above so the self-attn pool stays x-only.
         # When use_wrist_bridge is on, h_w is dropped from the self-attn
         # pool (handled inside MLPResNet.forward) and h_w_bridge supplies
         # per-layer wrist cross-attn instead.
@@ -914,6 +1053,7 @@ class VLAPolicy(nn.Module):
         head_out = self.action_head(
             x_init, h_a=h_a, h_t=h_t, p=p,
             h_w=h_w, h_sp=h_sp, h_w_bridge=h_w_bridge,
+            h_sp_per_layer=h_sp_per_layer, h_t_mask=h_t_mask,
         )                                                            # [B, T, D]
 
         # 10. action decoder.

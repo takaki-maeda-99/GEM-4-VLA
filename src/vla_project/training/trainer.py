@@ -5,6 +5,7 @@ Single-GPU `python scripts/train.py ...` and multi-GPU `accelerate launch
 constructor reads env vars set by `accelerate launch`; in single-process
 mode it is a near-no-op.
 """
+import contextlib
 import math
 import time
 from dataclasses import dataclass, field
@@ -274,41 +275,59 @@ class Trainer:
                         )
                         g["lr"] = init * mul
 
-                _, loss = self.model(batch)
-                # NaN guard: a non-finite forward loss propagates through
-                # backward → clip_grad_norm_ (norm of NaN is NaN) →
-                # optimizer.step (param − lr × NaN = NaN) and poisons every
-                # trainable param. No recovery without rewinding to a ckpt,
-                # so discard the whole accumulation window when this happens.
-                #
-                # The check must be DDP-synchronized: rank-local randomness
-                # (wrist_view_dropout, dataloader sharding) means one rank
-                # can hit non-finite while others stay finite. Skipping on a
-                # strict subset of ranks desyncs the next backward/clip/step
-                # NCCL collectives, eventually triggering the watchdog
-                # timeout (1800 s) and a SIGABRT. Re-applies the gather
-                # logic from 1a3db44 (reverted in 0def2dc as part of an
-                # unrelated data-loader rollback). v38 nb35 bs=8 hit the
-                # un-synced version at step 826.
-                loss_finite_local = torch.isfinite(loss).to(torch.uint8).view(1)
-                loss_finite_all = self.accelerator.gather(loss_finite_local)
-                if not bool(loss_finite_all.all().item()):
-                    nan_skip_count += 1
-                    self.optimizer.zero_grad()
-                    accum_i = 0
-                    accum_loss_sum = 0.0
-                    if self.accelerator.is_main_process:
-                        print(
-                            f"[WARN] step {step}: non-finite forward loss on "
-                            f"some rank (local={float(loss.detach()):.6g}); "
-                            f"skipping accumulation (total skipped: {nan_skip_count})",
-                            flush=True,
-                        )
-                    continue
-                # Keep optimizer-step gradients equivalent to a large batch by
-                # averaging microbatch losses before backward. Reporting below
-                # logs the mean *raw* loss over the accumulation window.
-                self.accelerator.backward(loss / accum_steps)
+                # DDP grad-sync suppression for non-final accumulation
+                # micro-batches. Without this, accelerator.backward() triggers
+                # an all-reduce of gradients on EVERY micro-batch — paying
+                # accum_steps × the comm overhead per optimizer step for no
+                # gain. no_sync() defers all-reduce until the final micro-batch
+                # backward, which is where gradients are actually consumed by
+                # optimizer.step. Single-GPU / accum_steps=1 is a no-op via
+                # nullcontext. See ``accelerator.no_sync`` docs and PyTorch
+                # DDP "no_sync" pattern.
+                is_final_accum = (accum_i + 1) == accum_steps
+                sync_ctx = (
+                    contextlib.nullcontext()
+                    if is_final_accum
+                    else self.accelerator.no_sync(self.model)
+                )
+                with sync_ctx:
+                    _, loss = self.model(batch)
+                    # NaN guard: a non-finite forward loss propagates through
+                    # backward → clip_grad_norm_ (norm of NaN is NaN) →
+                    # optimizer.step (param − lr × NaN = NaN) and poisons every
+                    # trainable param. No recovery without rewinding to a ckpt,
+                    # so discard the whole accumulation window when this happens.
+                    #
+                    # The check must be DDP-synchronized: rank-local randomness
+                    # (wrist_view_dropout, dataloader sharding) means one rank
+                    # can hit non-finite while others stay finite. Skipping on a
+                    # strict subset of ranks desyncs the next backward/clip/step
+                    # NCCL collectives, eventually triggering the watchdog
+                    # timeout (1800 s) and a SIGABRT. Re-applies the gather
+                    # logic from 1a3db44 (reverted in 0def2dc as part of an
+                    # unrelated data-loader rollback). v38 nb35 bs=8 hit the
+                    # un-synced version at step 826. ``gather`` is independent
+                    # of model.no_sync — it operates on the loss-finite flag
+                    # tensor we construct, not on parameter gradients.
+                    loss_finite_local = torch.isfinite(loss).to(torch.uint8).view(1)
+                    loss_finite_all = self.accelerator.gather(loss_finite_local)
+                    if not bool(loss_finite_all.all().item()):
+                        nan_skip_count += 1
+                        self.optimizer.zero_grad()
+                        accum_i = 0
+                        accum_loss_sum = 0.0
+                        if self.accelerator.is_main_process:
+                            print(
+                                f"[WARN] step {step}: non-finite forward loss on "
+                                f"some rank (local={float(loss.detach()):.6g}); "
+                                f"skipping accumulation (total skipped: {nan_skip_count})",
+                                flush=True,
+                            )
+                        continue
+                    # Keep optimizer-step gradients equivalent to a large batch by
+                    # averaging microbatch losses before backward. Reporting below
+                    # logs the mean *raw* loss over the accumulation window.
+                    self.accelerator.backward(loss / accum_steps)
                 accum_loss_sum += float(loss.detach().item())
                 accum_i += 1
                 if accum_i < accum_steps:

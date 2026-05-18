@@ -1,0 +1,129 @@
+# V45 OXE+LIBERO pretrain — continued from step_35000 to step_100000.
+#
+# Identical architecture / data / loader / hyperparams to:
+#   configs/train/oxe_pretrain_v45_nb18even_proper_mlp_alllinear_libero_dl50_bs8.yaml
+# Diffs:
+#   - train.resume_ckpt: step_15000 -> step_35000
+#   - train.max_steps: 35000 -> 100000
+#   - train.save_every: 5000 (keep)
+#   - wandb name + tag suffix _resume100k for separate run id
+#
+# Scheduler note: min_lr_ratio=1.0 with cosine -> constant lr after warmup.
+# Extending max_steps doesn't reshape decay (no decay to begin with). Peak lr
+# stays peak through to step 100k. warmup_steps=1000 and freeze_steps=5000
+# are already past at step 35k so they're no-ops on resume.
+#
+# Hardware: dl50 GPU 0-3 (NUMA0, 4x RTX 6000 Ada 49GB).
+#
+# Launch:
+#   cd /misc/dl00/takaki/X-VLA-Adapter
+#   MALLOC_ARENA_MAX=2 MALLOC_TRIM_THRESHOLD_=0 \
+#   CUDA_VISIBLE_DEVICES=0,1,2,3 \
+#   nohup .venv/bin/accelerate launch \
+#     --config_file configs/accelerate/dl50_4gpu.yaml \
+#     scripts/train.py configs/train/oxe_pretrain_v45_resume_100k_dl50_bs8.yaml \
+#     > outputs/oxe_pretrain_v45_nb18even_proper_mlp_alllinear_libero_dl50_bs8/launch_resume100k.log 2>&1 &
+seed: 0
+model:
+  num_domains: 13
+  compat_profile: x_vla_adapter
+  hidden_dim: 1536
+  num_blocks: 18
+  action_head_layer_mode: even
+  use_grad_checkpoint: false
+  use_wrist_bridge: false
+  wrist_in_llm: true
+  wrist_view_dropout_p: 0.2
+  ungated_streams: true
+  use_proper_residual: true
+  proper_ffn_mode: proper_mlp
+  layer_scale_init: 0.0001
+  mlp_ratio: 1.0
+  use_soft_prompt: true
+  num_soft_prompt_tokens: 32
+  soft_prompt_in_llm: true
+  prompt_position: after_vision
+  include_proprio_placeholder: true
+  proprio_in_llm: true
+  prompt_max_len: 20
+  use_baseline_projectors: false
+  proj_arch: da_2layer
+  proj_hidden_dim: 1536
+  vision_placeholder_mode: unused_range
+  freeze_llm_and_aq: false
+  freeze_action_queries: false
+  wrap_llm_in_no_grad: false
+  lora:
+    r: 64
+    alpha: 128
+    target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+    dropout: 0.0
+vision:
+  type: timm
+  model_name: google/siglip-so400m-patch14-224
+language:
+  model_name: google/gemma-4-E2B
+data:
+  type: oxe_interleaved
+  data_dir: /misc/dl00/takaki/vla-gemma-4/data/stage3_openx
+  action_chunk_len: 8
+  shuffle_buffer_size: 65536
+  train: true
+  seed: 42
+  traj_transform_threads: 13
+  traj_read_threads: 13
+  frame_transform_threads: 16
+  sources:
+    - {dataset_name: fractal20220817_data, domain_id: 0, weight: 1.0}
+    - {dataset_name: taco_play, domain_id: 1, weight: 1.0}
+    - {dataset_name: jaco_play, domain_id: 2, weight: 1.0}
+    - {dataset_name: viola, domain_id: 3, weight: 1.0}
+    - {dataset_name: berkeley_autolab_ur5, domain_id: 4, weight: 1.0}
+    - {dataset_name: stanford_hydra_dataset_converted_externally_to_rlds, domain_id: 5, weight: 1.0}
+    - {dataset_name: nyu_franka_play_dataset_converted_externally_to_rlds, domain_id: 6, weight: 1.0}
+    - {dataset_name: austin_sailor_dataset_converted_externally_to_rlds, domain_id: 7, weight: 1.0}
+    - {dataset_name: austin_sirius_dataset_converted_externally_to_rlds, domain_id: 8, weight: 1.0}
+    - {dataset_name: libero_10_no_noops,      domain_id: 9,  weight: 0.5}
+    - {dataset_name: libero_goal_no_noops,    domain_id: 10, weight: 0.5}
+    - {dataset_name: libero_object_no_noops,  domain_id: 11, weight: 0.5}
+    - {dataset_name: libero_spatial_no_noops, domain_id: 12, weight: 0.5}
+train:
+  batch_size: 8
+  optimizer_kind: adamw_8bit
+  lr: 2.0e-4
+  weight_decay: 0.01
+  max_steps: 100000                        # extended from 35000
+  freeze_steps: 5000                       # no-op on resume (already past)
+  warmup_steps: 1000                       # no-op on resume (already past)
+  freeze_group_names: [gemma_lora]
+  schedule_group_names:
+    - gemma_lora
+    - soft_prompts
+    - action_queries
+    - scene_projection
+    - head_projections
+    - action_head
+  min_lr_ratio: 1.0
+  grad_clip_norm: 1.0
+  ddp_find_unused_parameters: false
+  compile_mode: default
+  lr_coefs:
+    gemma_lora:        0.1
+    siglip:            0.0
+    wrist_siglip:      0.0
+    soft_prompts:      0.1
+    action_queries:    1.0
+    scene_projection:  1.0
+    head_projections:  1.0
+    action_head:       1.0
+  save_every: 5000
+  save_dir: outputs/oxe_pretrain_v45_nb18even_proper_mlp_alllinear_libero_dl50_bs8/checkpoints
+  diagnostic_first_n_batches: 0            # already past, skip
+  num_workers: 0
+  resume_ckpt: outputs/oxe_pretrain_v45_nb18even_proper_mlp_alllinear_libero_dl50_bs8/checkpoints/step_35000
+  resume_full: true
+wandb:
+  enabled: true
+  project: vla-project
+  name: oxe_libero_pretrain_v45_nb18even_proper_mlp_alllinear_libero_dl50_4gpu_bs8_resume100k
+  tags: [oxe_libero_pretrain, rlds, multidomain, interleaved, da_2layer, soft_prompt_llm, wrist_in_llm, proprio_in_llm, ungated_streams, lora_alllinear, proper_mlp, layerscale1e-4, 13_domains, libero_split, dl50, 4gpu, bs8, nb18, even, compile_default, gc_off, resume100k, freeze5k, warmup1k]

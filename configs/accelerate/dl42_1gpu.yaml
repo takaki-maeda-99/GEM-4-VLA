@@ -1,0 +1,23 @@
+# Accelerate launch preset for dl42: 1x A6000 50GB single-GPU.
+# Used when only one A6000 is free (kondo holds 0,1,2; only GPU 3 is open).
+# No DDP, so traffic stays local; bf16 retained for parity with the 4-GPU
+# pretrain numerics.
+#
+# Launch:
+#   CUDA_VISIBLE_DEVICES=3 \
+#     accelerate launch --config_file configs/accelerate/dl42_1gpu.yaml \
+#       scripts/train.py configs/train/libero_spatial_v43_step20k_ft.yaml
+compute_environment: LOCAL_MACHINE
+distributed_type: 'NO'
+downcast_bf16: 'no'
+machine_rank: 0
+main_training_function: main
+mixed_precision: bf16
+num_machines: 1
+num_processes: 1
+rdzv_backend: static
+same_network: true
+tpu_env: []
+tpu_use_cluster: false
+tpu_use_sudo: false
+use_cpu: false

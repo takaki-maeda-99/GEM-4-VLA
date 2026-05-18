@@ -30,6 +30,7 @@ class L1RegressionActionHead(nn.Module):
         layer_scale_init: float = 0.0,
         mlp_ratio: float = 1.0,
         output_action_dim: bool = False,
+        use_soft_prompt_cross_attn: bool = False,
     ) -> None:
         super().__init__()
         self.hidden_dim = hidden_dim
@@ -63,6 +64,7 @@ class L1RegressionActionHead(nn.Module):
             proper_ffn_mode=proper_ffn_mode,
             layer_scale_init=layer_scale_init,
             mlp_ratio=mlp_ratio,
+            use_soft_prompt_cross_attn=use_soft_prompt_cross_attn,
         )
 
     def forward(
@@ -74,7 +76,10 @@ class L1RegressionActionHead(nn.Module):
         h_w=None,                         # [B, K_w, D] (Bridge self-attn pool)
         h_sp=None,                        # [B, K_sp, D] (Bridge self-attn pool)
         h_w_bridge=None,                  # [B, num_blocks+1, K_w_b, D] (per-layer wrist cross-attn)
+        h_sp_per_layer=None,              # [B, num_blocks+1, K_sp, D] arch v3 soft_prompt per-layer hidden
+        h_t_mask=None,                    # [B, K_t] arch v3 task-stream pad mask (prompt only)
     ) -> torch.Tensor:
         return self.model(
             x, h_a=h_a, h_t=h_t, p=p, h_w=h_w, h_sp=h_sp, h_w_bridge=h_w_bridge,
+            h_sp_per_layer=h_sp_per_layer, h_t_mask=h_t_mask,
         )

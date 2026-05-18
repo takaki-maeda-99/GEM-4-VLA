@@ -1,0 +1,107 @@
+# V47 step_100000 (arch v3) -> takaki99/GEM4_open_the_jar FT.
+# New domain row 13 (v47 has 13 domains 0-12 → expand to 14 with random init
+# for the jar row, per DA-row-init MEMORY rule).
+#
+# Action representation (handled inside LeRobotSO101Dataset):
+#   action 7-dim = [delta_ee_pos (3), delta_rotvec via logmap (3), gripper/100 (1)]
+#   proprio 8-dim = [obs.ee_pos (3), obs.ee_rotvec (3), gripper/100 (1), 0 pad (1)]
+# Hand-teach: action.ee_pos[t] was synthesized = obs.state.ee_pos[t+1] in
+# tools/convert_rebot_jar_v3_to_v21.py, so a_pos - o_pos = obs[t+1] - obs[t]
+# is the actual achieved delta.
+#
+# Data: 301 episodes, 57278 frames (no failures filtered).
+# Hardware: dl41 GPU 6,7 (RTX A6000 49GB). 2 GPU DDP × bs=8 × accum=2 = eff bs 32.
+# Run with CUDA_HOME=/tmp/micromamba/envs/cuda-nvcc on dl41 (deepspeed cuda
+# probe in accelerate.unwrap_model requires CUDA_HOME on this host).
+seed: 0
+model:
+  num_domains: 14                          # 13 v47 (0-12) + jar row 13
+  compat_profile: x_vla_adapter
+  hidden_dim: 1536
+  num_blocks: 18
+  action_head_layer_mode: even
+  use_grad_checkpoint: true
+  use_wrist_bridge: false
+  wrist_in_llm: true
+  wrist_view_dropout_p: 0.0
+  ungated_streams: true
+  use_proper_residual: true
+  proper_ffn_mode: proper_mlp
+  layer_scale_init: 0.0001
+  mlp_ratio: 1.0
+  use_soft_prompt: true
+  num_soft_prompt_tokens: 32
+  soft_prompt_in_llm: true
+  prompt_position: after_vision
+  include_proprio_placeholder: true
+  proprio_in_llm: true
+  prompt_max_len: 20
+  prompt_in_task_stream: true              # arch v3
+  proprio_in_task_stream: true             # arch v3
+  soft_prompt_as_cross_attn_stream: true   # arch v3
+  legacy_external_in_self_pool: false      # arch v3
+  use_baseline_projectors: false
+  proj_arch: da_2layer
+  proj_hidden_dim: 1536
+  vision_placeholder_mode: unused_range
+  freeze_llm_and_aq: false
+  freeze_action_queries: false
+  wrap_llm_in_no_grad: false
+  log_per_domain_loss: false
+  lora:
+    r: 64
+    alpha: 128
+    target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+    dropout: 0.0
+vision:
+  type: timm
+  model_name: google/siglip-so400m-patch14-224
+language:
+  model_name: google/gemma-4-E2B
+data:
+  type: lerobot_preextracted               # custom dataset: parquet + memmap'd uint8 frame npy (no mp4 decode)
+  root: data/converted/takaki99_GEM4_open_the_jar_v21
+  frames_root: data/converted/takaki99_GEM4_open_the_jar_v21/frames_uint8
+  unnorm_key: jar_open
+  stats_path: data/norm_stats/jar_open.json
+  fps: 10
+  action_chunk_len: 8
+  domain_id: 13                            # new jar row
+  last_action_chunk_mode: zero
+  scene_key: observation.images.front
+  wrist_key: observation.images.wrist
+  seed: 42
+train:
+  batch_size: 8
+  gradient_accumulation_steps: 2
+  optimizer_kind: adamw_8bit
+  lr: 1.0e-4
+  weight_decay: 0.01
+  max_steps: 15000
+  freeze_steps: 1500                       # 10% of max_steps (gemma_lora frozen)
+  warmup_steps: 750                        # 5% of max_steps
+  freeze_group_names: [gemma_lora]
+  schedule_group_names: [gemma_lora, action_queries, scene_projection, soft_prompts]
+  min_lr_ratio: 1.0
+  grad_clip_norm: 1.0
+  ddp_find_unused_parameters: false
+  resume_ckpt: outputs/oxe_pretrain_v47_arch_v3_libero_dl50_bs8/checkpoints/step_100000
+  resume_da_row_init: random               # MANDATORY: new DA row must be random-init
+  lr_coefs:
+    gemma_lora:        0.1
+    siglip:            0.0
+    wrist_siglip:      0.0
+    soft_prompts:      0.5
+    action_queries:    0.5
+    scene_projection:  0.5
+    head_projections:  1.0
+    action_head:       1.0
+  save_every: 2500
+  save_dir: outputs/jar_open_v47_step100k_ft_dl42_2gpu/checkpoints
+  diagnostic_first_n_batches: 50
+  num_workers: 4                            # parallel video decode (pre-resized to 224x224)
+wandb:
+  enabled: true
+  project: vla-project
+  name: oxe_v47_step100k_ft_jar_open_domain13_dl42_2gpu_accum2
+  tags: [jar_open, ft, oxe_v47_arch_v3, step100k, domain13, lora_alllinear, nb18, even, proprio_in_llm, prompt_in_task_stream, proprio_in_task_stream, soft_prompt_cross_attn, self_x_only, ungated_streams, proper_residual, proper_mlp, layerscale1e-4, dl42, gpu01, 2gpu_ddp, accum2, eff_bs32, random_da, ee_delta, logmap, hand_teach]

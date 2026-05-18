@@ -24,6 +24,7 @@ class MLPResNet(nn.Module):
         proper_ffn_mode: str = "legacy",
         layer_scale_init: float = 0.0,
         mlp_ratio: float = 1.0,
+        use_soft_prompt_cross_attn: bool = False,
     ) -> None:
         super().__init__()
         self.action_dim = action_dim
@@ -44,6 +45,7 @@ class MLPResNet(nn.Module):
                     proper_ffn_mode=proper_ffn_mode,
                     layer_scale_init=layer_scale_init,
                     mlp_ratio=mlp_ratio,
+                    use_soft_prompt_cross_attn=use_soft_prompt_cross_attn,
                 )
                 for _ in range(num_blocks)
             ]
@@ -54,8 +56,11 @@ class MLPResNet(nn.Module):
     def _run_block(self, blk: nn.Module, x: torch.Tensor,
                    h_a_i: torch.Tensor, h_t_i: torch.Tensor,
                    p: Optional[torch.Tensor] = None,
-                   h_w_l: Optional[torch.Tensor] = None) -> torch.Tensor:
-        return blk(x, h_a=h_a_i, h_t=h_t_i, p=p, h_w_l=h_w_l)
+                   h_w_l: Optional[torch.Tensor] = None,
+                   h_sp_l: Optional[torch.Tensor] = None,
+                   h_t_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        return blk(x, h_a=h_a_i, h_t=h_t_i, p=p, h_w_l=h_w_l,
+                   h_sp_l=h_sp_l, h_t_mask=h_t_mask)
 
     def forward(
         self,
@@ -66,6 +71,8 @@ class MLPResNet(nn.Module):
         h_w: Optional[torch.Tensor] = None,    # [B, K_w, D]  final-layer wrist (Bridge self-attn pool)
         h_sp: Optional[torch.Tensor] = None,   # [B, K_sp, D] final-layer soft prompt (Bridge self-attn pool)
         h_w_bridge: Optional[torch.Tensor] = None,  # [B, num_blocks+1, K_w_b, D] per-layer wrist (Bridge cross-attn)
+        h_sp_per_layer: Optional[torch.Tensor] = None,  # [B, num_blocks+1, K_sp, D] arch v3 soft_prompt per-layer hidden
+        h_t_mask: Optional[torch.Tensor] = None,        # [B, K_t] arch v3 task-stream pad mask (prompt only)
     ) -> torch.Tensor:
         """Bridge form (``action_heads.py:133-176`` ``use_pro_version=True``,
         ``use_proper_ffn=True``, ``use_xvla_style=False``):
@@ -94,12 +101,14 @@ class MLPResNet(nn.Module):
             h_a_i = h_a[:, i + 1]
             h_t_i = h_t[:, i + 1]
             h_w_l = h_w_bridge[:, i + 1] if wrist_bridge_active else None
+            h_sp_l = h_sp_per_layer[:, i + 1] if h_sp_per_layer is not None else None
             if self.use_grad_checkpoint and self.training:
                 x = ckpt.checkpoint(
-                    self._run_block, blk, x, h_a_i, h_t_i, p, h_w_l, use_reentrant=False
+                    self._run_block, blk, x, h_a_i, h_t_i, p, h_w_l, h_sp_l, h_t_mask,
+                    use_reentrant=False,
                 )
             else:
-                x = self._run_block(blk, x, h_a_i, h_t_i, p, h_w_l)
+                x = self._run_block(blk, x, h_a_i, h_t_i, p, h_w_l, h_sp_l, h_t_mask)
         x = x[:, :action_len, :]
         x = self.fc2(self.layer_norm2(x))
         return x
