@@ -1,0 +1,64 @@
+# Eval v47 (arch v3) step_40000 -> LIBERO 10 FT @ step_40000.
+seed: 7
+checkpoint:
+  path: outputs/libero_10_v47_step95k_ft_4gpu_accum4/checkpoints/step_40000
+  strict: true
+model:
+  num_domains: 13
+  compat_profile: x_vla_adapter
+  hidden_dim: 1536
+  num_blocks: 18
+  action_head_layer_mode: even
+  use_grad_checkpoint: false
+  use_wrist_bridge: false
+  wrist_in_llm: true
+  wrist_view_dropout_p: 0.0
+  ungated_streams: true
+  use_proper_residual: true
+  proper_ffn_mode: proper_mlp
+  layer_scale_init: 0.0001
+  mlp_ratio: 1.0
+  use_soft_prompt: true
+  num_soft_prompt_tokens: 32
+  soft_prompt_in_llm: true
+  prompt_position: after_vision
+  include_proprio_placeholder: true
+  proprio_in_llm: true
+  prompt_max_len: 20
+  prompt_in_task_stream: true                  # arch v3
+  proprio_in_task_stream: true                 # arch v3
+  soft_prompt_as_cross_attn_stream: true       # arch v3
+  legacy_external_in_self_pool: false          # arch v3
+  use_baseline_projectors: false
+  proj_arch: da_2layer
+  proj_hidden_dim: 1536
+  vision_placeholder_mode: unused_range
+  freeze_llm_and_aq: false
+  freeze_action_queries: false
+  wrap_llm_in_no_grad: false
+  lora:
+    r: 64
+    alpha: 128
+    target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+    dropout: 0.0
+vision:
+  type: timm
+  model_name: google/siglip-so400m-patch14-224
+language: {model_name: google/gemma-4-E2B}
+data:
+  unnorm_key: libero_10_no_noops
+  stats_path: /misc/dl00/takaki/X-VLA-Adapter/data/libero_stats/LIBERO-10-Pro/dataset_statistics.json
+robot:
+  bddl_path_root: /misc/dl00/takaki/vla-gemma-4/LIBERO/libero/libero/bddl_files
+  task_suite: libero_10
+  image_size: 256
+  libero_path: ${oc.env:LIBERO_PATH,/misc/dl00/takaki/vla-gemma-4/LIBERO}
+eval:
+  domain_id: 9
+  task_idxs: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+  num_episodes_per_task: 5
+  max_steps: 520
+  num_steps_wait: 10
+  video_dir: outputs/libero_10_v47_step95k_ft_4gpu_accum4/eval_videos_step40000_max520_4gpu_accum4
+  video_ext: mp4
+  video_fps: 10

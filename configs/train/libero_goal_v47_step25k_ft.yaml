@@ -1,0 +1,103 @@
+# V47 step_25000 (arch v3) -> LIBERO Spatial FT (domain_id=12).
+#
+# v47 pretrain saw 4 LIBERO suites alongside 9 OXE sources (13 domains total).
+# domain_id mapping in v47 (same as v45):
+#   0-8  = OXE  9 = libero_10  10 = libero_goal  11 = libero_object  12 = libero_spatial
+#
+# arch v3 flags (must match v47 pretrain):
+#   - prompt_in_task_stream: true
+#   - proprio_in_task_stream: true
+#   - soft_prompt_as_cross_attn_stream: true
+#   - legacy_external_in_self_pool: false
+#
+# FT hyperparams scaled from v45 (15000) to 10000:
+#   - freeze_steps 1000  warmup 500  save_every 5000 (mid + final only)
+#
+# Hardware: dl50 GPU 0 (RTX 6000 Ada 49GB).
+seed: 0
+model:
+  num_domains: 13
+  compat_profile: x_vla_adapter
+  hidden_dim: 1536
+  num_blocks: 18
+  action_head_layer_mode: even
+  use_grad_checkpoint: true
+  use_wrist_bridge: false
+  wrist_in_llm: true
+  wrist_view_dropout_p: 0.0
+  ungated_streams: true
+  use_proper_residual: true
+  proper_ffn_mode: proper_mlp
+  layer_scale_init: 0.0001
+  mlp_ratio: 1.0
+  use_soft_prompt: true
+  num_soft_prompt_tokens: 32
+  soft_prompt_in_llm: true
+  prompt_position: after_vision
+  include_proprio_placeholder: true
+  proprio_in_llm: true
+  prompt_max_len: 20
+  prompt_in_task_stream: true                  # arch v3
+  proprio_in_task_stream: true                 # arch v3
+  soft_prompt_as_cross_attn_stream: true       # arch v3
+  legacy_external_in_self_pool: false          # arch v3
+  use_baseline_projectors: false
+  proj_arch: da_2layer
+  proj_hidden_dim: 1536
+  vision_placeholder_mode: unused_range
+  freeze_llm_and_aq: false
+  freeze_action_queries: false
+  wrap_llm_in_no_grad: false
+  log_per_domain_loss: false
+  lora:
+    r: 64
+    alpha: 128
+    target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+    dropout: 0.0
+vision:
+  type: timm
+  model_name: google/siglip-so400m-patch14-224
+language:
+  model_name: google/gemma-4-E2B
+data:
+  type: libero_rlds
+  data_dir: /misc/dl00/takaki/vla-gemma-4/data/modified_libero_rlds
+  dataset_name: libero_goal_no_noops
+  action_chunk_len: 8
+  shuffle_buffer_size: 16384
+  train: true
+  domain_id: 10
+  seed: 42
+  unnorm_key: libero_goal_no_noops
+  stats_path: /misc/dl00/takaki/X-VLA-Adapter/data/libero_stats/LIBERO-Goal-Pro/dataset_statistics.json
+train:
+  batch_size: 8
+  optimizer_kind: adamw_8bit
+  lr: 1.0e-4
+  weight_decay: 0.01
+  max_steps: 10000
+  freeze_steps: 1000
+  warmup_steps: 500
+  freeze_group_names: [gemma_lora]
+  schedule_group_names: [gemma_lora, action_queries, scene_projection, soft_prompts]
+  min_lr_ratio: 1.0
+  grad_clip_norm: 1.0
+  ddp_find_unused_parameters: false
+  resume_ckpt: outputs/oxe_pretrain_v47_arch_v3_libero_dl50_bs8/checkpoints/step_25000
+  lr_coefs:
+    gemma_lora:        0.1
+    siglip:            0.0
+    wrist_siglip:      0.0
+    soft_prompts:      0.5
+    action_queries:    0.5
+    scene_projection:  0.5
+    head_projections:  1.0
+    action_head:       1.0
+  save_every: 5000
+  save_dir: outputs/libero_goal_v47_step25k_ft/checkpoints
+  diagnostic_first_n_batches: 50
+wandb:
+  enabled: true
+  project: vla-project
+  name: oxe_v47_step25k_ft_libero_goal_domain10
+  tags: [libero_goal, ft, oxe_v47_arch_v3, step25k, domain10, lora_alllinear, nb18, even, proprio_in_llm, prompt_in_task_stream, proprio_in_task_stream, soft_prompt_cross_attn, self_x_only, ungated_streams, proper_residual, proper_mlp, layerscale1e-4, dl42, gpu0]

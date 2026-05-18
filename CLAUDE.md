@@ -688,6 +688,51 @@ For policy changes, verify:
 
 observation -> policy.select_action -> executable action
 
+# DA Row Init for FT (DO NOT COPY)
+
+When fine-tuning with a larger `num_domains` than the pretrain checkpoint (adding new domains at FT time), `train.resume_da_row_init` MUST be `random`. **`copy_row_<n>` is forbidden.**
+
+**Why**: OXE per-dataset proprio is canonicalized to 8-dim by zero-padding sources whose state encoding has fewer dims. Different OXE sources thus have different "zero" dims. Example measured 2026-05-10:
+
+| dim | LIBERO (target row, e.g. row 9) std | taco_play (potential source row 1) std |
+|---|---|---|
+| 6 (LIBERO gripper bit) | **0.89 (most informative)** | **0.00 (zero-pad)** |
+
+`copy_row_1` would transfer taco_play's `proprio_proj.fc1` weights — which learned to ignore dim 6 because taco_play never varies it — to the new LIBERO row, starting FT with "ignore the most informative LIBERO proprio dim". The model is severely handicapped from step 0.
+
+The same issue applies to scene/wrist/action_decoder DA rows when distributions of relevant features differ across datasets. `random` init forces the new row to learn from scratch on the FT data without inheriting incompatible inductive biases.
+
+# Monitoring Training Runs (READ THIS BEFORE CALLING A RUN STUCK)
+
+The training entrypoint `scripts/train.py` calls `accelerator.log(payload, step=step)` once per optimizer step (`src/vla_project/training/trainer.py:342`). That payload routes to wandb when `wandb.enabled: true`, and is the **only** place per-step metrics (`train/loss`, `train/grad_norm`, `train/step_time_ms`, `_step`, etc.) are emitted.
+
+**The trainer does NOT print per-step lines to stdout.** Therefore:
+
+- After dataset init / compile completes, `launch.log` (= stdout) goes silent. This is normal, NOT a stuck state.
+- "tail launch.log shows nothing new" is NOT evidence that training has stopped. It is **expected**.
+- The only stdout per-step output is the `[WARN] step N: non-finite ...` NaN guard line, which fires only when forward loss or grad_norm is non-finite — typically zero events on a healthy run.
+
+Always check wandb when assessing run progress, not just stdout:
+
+```python
+import wandb
+api = wandb.Api()
+run = api.run('takaki-maeda-1999-toyota-technological-institute/vla-project/<run_id>')
+print(run.state, run.summary.get('_step'), run.summary.get('train/loss'))
+```
+
+The `<run_id>` is the suffix of the wandb run-dir under `/misc/dl00/takaki/X-VLA-Adapter/wandb/run-<timestamp>-<run_id>/`. The wandb run also exposes `train/eta_s` and `train/progress_pct` for sanity-check on whether the loop is healthy.
+
+A run is genuinely stuck only when ALL of:
+
+1. wandb run.state = "running" but `_step` has not advanced for many minutes.
+2. GPU util has dropped to 0% on all ranks (no compute happening).
+3. No `[WARN]`, no NCCL watchdog warning, but the process is alive.
+
+Until you have all three, the run is most likely just compiling or filling shuffle buffers — both of which are silent on stdout.
+
+The shuffle-buffer fill IS visible in stdout (`tensorflow/core/kernels/data/shuffle_dataset_op.cc:452] Shuffle buffer filled.`). After it completes, expect ~10-30 min of silence while `torch.compile` builds the graph (longer when model code changes invalidate the inductor cache at `/tmp/torchinductor_takaki/`).
+
 # Code Review Workflow
 
 Use the local `codex` CLI (model: `gpt-5.5`) as a peer reviewer at the following checkpoints. Do not skip — the user has explicitly asked for this cadence.
