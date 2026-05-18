@@ -128,12 +128,38 @@ def build_app(
     @app.exception_handler(RequestValidationError)
     async def _on_validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
         errors = jsonable_encoder(exc.errors())
+        # Surface validation errors in the server log so operators can debug
+        # 422s without inspecting the client response body. Each entry has
+        # `loc` (field path), `type` (error kind), and `msg` (human-readable).
+        summary = "; ".join(
+            f"{'.'.join(str(p) for p in e.get('loc', []))}: {e.get('type')} ({e.get('msg')})"
+            for e in errors
+        )
+        logger.warning("validation_error path=%s errors=[%s]", request.url.path, summary)
         return JSONResponse(status_code=422, content={"detail": errors})
 
     @app.post("/predict", response_model=PredictResponse)
     async def predict(req: PredictRequest, request: Request) -> PredictResponse:
         request_id = request.headers.get("X-Request-Id") or uuid.uuid4().hex
         t0 = time.monotonic_ns()
+        # Bound the per-request log size: proprio is normally 7-14 floats,
+        # but Pydantic doesn't cap the list, so log length + truncated sample
+        # instead of the full vector to keep the log line bounded even if a
+        # caller submits an oversized payload (validation rejects it later).
+        proprio_len = len(req.proprio)
+        proprio_sample = list(req.proprio[:8])
+        logger.info(
+            "predict_request request_id=%s instruction=%r"
+            " proprio_len=%d proprio_head=%s"
+            " image_primary_b64_len=%d image_wrist_b64_len=%s model_version=%s",
+            request_id,
+            req.instruction,
+            proprio_len,
+            proprio_sample,
+            len(req.image_primary),
+            len(req.image_wrist) if req.image_wrist is not None else None,
+            req.model_version,
+        )
         try:
             scene = decode_jpeg_b64(req.image_primary)
             wrist_was_provided = req.image_wrist is not None
@@ -145,6 +171,11 @@ def build_app(
                 )
             else:
                 wrist = np.zeros((224, 224, 3), dtype=np.uint8)
+            logger.info(
+                "predict_decoded request_id=%s scene_shape=%s wrist_shape=%s"
+                " wrist_provided=%s",
+                request_id, scene.shape, wrist.shape, wrist_was_provided,
+            )
 
             proprio_raw = np.asarray(req.proprio, dtype=np.float32)
             if len(proprio_raw) != len(proprio_stats["q99"]):
@@ -162,6 +193,11 @@ def build_app(
                 "language": req.instruction,
             }
         except Exception as e:
+            elapsed_ms = (time.monotonic_ns() - t0) / 1e6
+            logger.warning(
+                f"request_invalid request_id={request_id} elapsed_ms={elapsed_ms:.1f}"
+                f" error={type(e).__name__}: {e}"
+            )
             raise HTTPException(status_code=422, detail=str(e)) from e
 
         if state["inject_sleep_s"] > 0:

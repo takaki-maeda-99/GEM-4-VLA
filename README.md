@@ -30,19 +30,41 @@ In flight (no eval yet):
 
 ## Setup
 
+This repo uses two separate uv environments under `envs/` — the host's CPU
+arch determines which one to install:
+
+| host                                  | script                          | env dir         | wheels                                  |
+|---------------------------------------|---------------------------------|-----------------|-----------------------------------------|
+| x86_64 Linux (training / research)    | `bash scripts/setup_x86.sh`     | `envs/x86`      | PyTorch cu128 (driver ≥ 12.6)           |
+| Jetson Orin (JetPack 6 / CUDA 12.6)   | `bash scripts/setup_jetson.sh`  | `envs/jetson`   | jetson-ai-lab JP6/cu126 (sm_87, cp310)  |
+
+Each setup script installs uv (if missing), initialises the `VLA-Adapter` and
+`X-VLA` submodules, runs `uv sync --project envs/<env>`, and finishes with a
+torch + Gemma4 smoke check.
+
+After setup, every command must target the chosen env via `--project`:
+
 ```bash
-bash scripts/setup.sh
+uv run --project envs/x86    python scripts/train.py configs/train/<config>.yaml
+uv run --project envs/jetson python scripts/serve.py ...
 ```
 
-Installs uv (if missing), syncs deps via `uv sync --extra dev`, initialises
-the `VLA-Adapter` and `X-VLA` submodules, and runs a torch + Gemma4 smoke
-check. See [`scripts/setup.sh`](scripts/setup.sh) for details.
-
-Pre-requisites the script does **not** handle (host-specific):
+Pre-requisites the scripts do **not** handle (host-specific):
 
 - a sibling `vla-gemma-4/` checkout providing RLDS data + baseline checkpoints
 - LIBERO simulator + assets (uses `MUJOCO_GL=osmesa` for headless render)
-- Hugging Face token (`uv run huggingface-cli login`) for Gemma4 / SigLIP
+- Hugging Face token (`uv run --project envs/<env> huggingface-cli login`) for
+  Gemma4 / SigLIP
+
+### Why two envs?
+
+- `tensorflow-addons==0.23.0` (transitive from `dlimp`/OXE-RLDS) has no Linux
+  aarch64 wheel — the Jetson env therefore omits the RLDS data-pipeline deps.
+- Upstream PyTorch cu126/cu128/cu130 wheels are built for sm_90+ and crash
+  with `no kernel image` at `.to('cuda')` on Orin (sm_87). The Jetson env
+  pulls torch / torchvision from the jetson-ai-lab JP6 / cu126 index instead.
+- The cu128 index publishes 3.10 **and** 3.11 wheels, but jetson-ai-lab only
+  has cp310 wheels — both envs are pinned to Python 3.10 for parity.
 
 ## Repo layout
 
@@ -70,7 +92,7 @@ Single-GPU (current default — multi-GPU NCCL is host-unstable):
 ```bash
 CUDA_VISIBLE_DEVICES=0 \
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-uv run python scripts/train.py configs/train/libero_spatial_v33.yaml
+uv run --project envs/x86 python scripts/train.py configs/train/libero_spatial_v33.yaml
 ```
 
 Run names + checkpoints land under `outputs/<wandb.name>/`.
@@ -78,7 +100,7 @@ Run names + checkpoints land under `outputs/<wandb.name>/`.
 ## Evaluation
 
 ```bash
-uv run python scripts/eval.py configs/eval/libero_v33_step10000.yaml
+uv run --project envs/x86 python scripts/eval.py configs/eval/libero_v33_step10000.yaml
 ```
 
 Eval rolls out 50 episodes per suite; metrics + per-task results write to
@@ -105,7 +127,7 @@ for details.
 ### HoldPosition smoke (no GPU)
 
 ```bash
-uv run python scripts/serve.py \
+uv run --project envs/x86 python scripts/serve.py \
   --predictor hold_position \
   --port 8001
 
@@ -123,21 +145,21 @@ caches under `~/.cache/huggingface/hub/`; subsequent loads are free.
 ```bash
 # Load directly from Hugging Face Hub.
 CUDA_VISIBLE_DEVICES=0 \
-  uv run python scripts/serve.py \
+  uv run --project envs/x86 python scripts/serve.py \
     --checkpoint takaki99/GEM-4-FT-bottle \
     --port 8001
 
 # To enable the ckpt-bundled post_process.py for HF-resolved ckpts,
 # explicitly opt in:
 CUDA_VISIBLE_DEVICES=0 \
-  uv run python scripts/serve.py \
+  uv run --project envs/x86 python scripts/serve.py \
     --checkpoint takaki99/GEM-4-FT-bottle \
     --trust-checkpoint-code \
     --port 8001
 
 # Local ckpt directory.
 CUDA_VISIBLE_DEVICES=0 \
-  uv run python scripts/serve.py \
+  uv run --project envs/x86 python scripts/serve.py \
     --checkpoint outputs/so101_v46_step30k_ft_dl50/checkpoints/step_2000 \
     --port 8001
 
@@ -193,13 +215,13 @@ serve) is automated by these tools:
 ```bash
 # 1. Convert HF v3.0 → v2.1 layout consumable by lerobot 0.3.3,
 #    and drop episodes with success=False / deleted=True.
-uv run python tools/convert_so101_v3_to_v21.py \
+uv run --project envs/x86 python tools/convert_so101_v3_to_v21.py \
   --repo_id takaki99/test_so101 \
   --out_root data/converted/takaki99_test_so101_v21
 
 # 2. Compute Q99 stats for EE-delta action (with SO(3) logmap for d_rotvec
 #    — plain subtraction wraps around at ±π) + EE-pose proprio.
-uv run python tools/compute_norm_stats_so101.py \
+uv run --project envs/x86 python tools/compute_norm_stats_so101.py \
   --converted_root data/converted/takaki99_test_so101_v21 \
   --dataset_key so101_test \
   --output data/norm_stats/so101_test.json
@@ -208,7 +230,7 @@ uv run python tools/compute_norm_stats_so101.py \
 #    domain — never copy_row_<n> for a fresh embodiment, see CLAUDE.md
 #    "DA Row Init for FT").
 CUDA_VISIBLE_DEVICES=4 \
-  uv run accelerate launch \
+  uv run --project envs/x86 accelerate launch \
     --config_file configs/accelerate/dl50_1gpu.yaml \
     --main_process_port 29501 \
     scripts/train.py configs/train/so101_v46_step30k_ft_dl50.yaml
@@ -230,10 +252,12 @@ Architecture diffs over time live in [`docs/architectures/*.mmd`](docs/architect
 
 ## Known quirks
 
-- **cu128 wheels** are pinned (driver ≥ 12.6 hosts; Blackwell sm_120). See
-  `[tool.uv.sources]` in `pyproject.toml`.
+- **Two envs (`envs/x86`, `envs/jetson`)** — see [Setup](#setup) above.
+  The PyTorch wheel index, Python version, and RLDS opt-in differ per env;
+  always pass `--project envs/<env>` to uv commands.
 - **transformers ≥ 5.0** required for Gemma4 `model_type` registration;
-  lerobot's `<5.0` cap is bypassed via `[tool.uv] override-dependencies`.
+  lerobot's `<5.0` cap is bypassed via `[tool.uv] override-dependencies`
+  in each env pyproject.
 - **ROS2 on `PYTHONPATH`** breaks pytest plugin discovery — prefix tests
   with `PYTHONPATH=""`. See [`DEVELOPMENT.md`](DEVELOPMENT.md).
 - **NCCL multi-GPU** is currently broken on hosts with NVML driver/library
@@ -244,8 +268,8 @@ Architecture diffs over time live in [`docs/architectures/*.mmd`](docs/architect
 ## Development
 
 ```bash
-PYTHONPATH="" uv run pytest -v        # tests
-uv run ruff check src/ tests/         # lint
+PYTHONPATH="" uv run --project envs/x86 pytest -v        # tests (use x86 env)
+uv run --project envs/x86 ruff check src/ tests/         # lint
 ```
 
 See [`DEVELOPMENT.md`](DEVELOPMENT.md) and [`CLAUDE.md`](CLAUDE.md).

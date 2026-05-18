@@ -1,0 +1,53 @@
+[project]
+name = "vla-env-x86"
+version = "0.0.1"
+description = "x86_64 CUDA training/research environment for vla_project (cu128 wheels)"
+requires-python = ">=3.10,<3.11"
+
+# Concrete deps for the x86_64 training/research host:
+#   - PyTorch cu128 wheels (driver >= 12.6).
+#   - dlimp + tensorflow-graphics for the OXE/RLDS data pipeline (tensorflow
+#     wheels are only published for Linux x86_64 / macOS, not Jetson aarch64).
+#   - dev tools (pytest, ruff, mypy) live here too.
+# The core `vla_project` package is pulled in via the path dep below.
+dependencies = [
+    "vla_project",
+    # torch/torchvision listed explicitly so the source pins in
+    # [tool.uv.sources] below take effect (uv applies `sources` entries only
+    # to direct deps of this pyproject — transitive torch via `vla_project`
+    # would otherwise resolve from default PyPI instead of cu128).
+    "torch",
+    "torchvision",
+    # OXE/RLDS pipeline; transitively pulls tensorflow==2.15.0 +
+    # tensorflow_datasets>=4.9.2. tensorflow-addons==0.23.0 has no Linux
+    # aarch64 wheel, which is why this lives in the x86 env only.
+    "dlimp @ git+https://github.com/moojink/dlimp_openvla@040105d256bd28866cc6620621a3d5f7b6b91b46",
+    # imported by prismatic/vla/datasets/rlds/oxe/utils/droid_utils.py
+    # (zero_action_filter)
+    "tensorflow-graphics>=2021.12",
+    "pytest>=8.0",
+    "pytest-xdist>=3.5",
+    "ruff>=0.6",
+    "mypy>=1.10",
+]
+
+# This pyproject is an env-config project, not a publishable package.
+[tool.uv]
+package = false
+# Override lerobot's optional `transformers<5.0.0` upper cap. We need
+# transformers>=5.x for Gemma4 model_type support; lerobot's core API
+# (LeRobotDataset) does not depend on transformers internals.
+override-dependencies = ["transformers>=5.5"]
+
+# Pin torch/torchvision to PyTorch's cu128 wheels because the host
+# CUDA driver (12.8.0) is older than the cu130 wheels that uv would
+# otherwise resolve. cu128 covers driver >= 12.6 which our system has.
+[tool.uv.sources]
+vla_project = { path = "../..", editable = true }
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true

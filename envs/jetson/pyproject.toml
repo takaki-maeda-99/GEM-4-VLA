@@ -1,0 +1,61 @@
+[project]
+name = "vla-env-jetson"
+version = "0.0.1"
+description = "Jetson Orin (JetPack 6 / CUDA 12.6, sm_87) deploy environment for vla_project"
+# Jetson jetson-ai-lab index only publishes cp310 wheels.
+requires-python = "==3.10.*"
+
+# Concrete deps for the Jetson Orin (aarch64) deploy host:
+#   - PyTorch wheels from the jetson-ai-lab JetPack 6 / CUDA 12.6 index
+#     (sm_87 baked in; upstream cu128 wheels are sm_90+ and crash with
+#     "no kernel image" at .to(cuda) on Orin).
+#   - NO dlimp / tensorflow-graphics: tensorflow-addons==0.23.0 (transitive)
+#     has no Linux aarch64 wheel, and the deploy host doesn't need the
+#     OXE/RLDS data pipeline anyway.
+# The core `vla_project` package is pulled in via the path dep below.
+dependencies = [
+    "vla_project",
+    # torch/torchvision listed explicitly so the source pins in
+    # [tool.uv.sources] below apply (uv applies `sources` entries only
+    # to direct deps of this pyproject).
+    "torch",
+    "torchvision",
+]
+
+# This pyproject is an env-config project, not a publishable package.
+[tool.uv]
+package = false
+override-dependencies = [
+    # Gemma4 model_type requires transformers>=5.5; lerobot caps it at <5.0.
+    "transformers>=5.5",
+    # PyTorch's Linux wheel metadata depends on triton, but Triton only
+    # publishes Linux x86_64 wheels. Keep it out of the Jetson/aarch64 solve.
+    "triton; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    # Jetson torchvision wheels start at 0.23.0; override lerobot's
+    # torchvision<0.23 upper cap. lerobot's I/O surface is stable across
+    # this minor bump.
+    "torchvision>=0.23.0",
+    # transformers>=5.5 requires huggingface-hub>=1.5, but lerobot caps it
+    # at <0.36. Override lerobot's cap; the LeRobotDataset API used here
+    # does not depend on the deprecated hub internals.
+    "huggingface-hub>=1.5.0",
+    # Jetson torch wheels start at 2.8.0; override lerobot 0.3.3-0.4.3's
+    # torch<2.8.0 upper cap. LeRobotDataset does not depend on torch
+    # internals across this minor bump.
+    "torch>=2.8.0",
+]
+
+# Pin torch/torchvision to the jetson-ai-lab JetPack 6 / CUDA 12.6 wheels.
+# The host is a Jetson Orin (sm_87) running JetPack 6.2.x with CUDA 12.6;
+# upstream PyTorch wheels (cu126/cu128/cu130) are built for sm_90+ only
+# and crash with "no kernel image" at .to(cuda). The jetson-ai-lab index
+# ships aarch64 wheels with sm_87 baked in (Python 3.10 only).
+[tool.uv.sources]
+vla_project = { path = "../..", editable = true }
+torch = { index = "pytorch-jetson" }
+torchvision = { index = "pytorch-jetson" }
+
+[[tool.uv.index]]
+name = "pytorch-jetson"
+url = "https://pypi.jetson-ai-lab.io/jp6/cu126/+simple"
+explicit = true
