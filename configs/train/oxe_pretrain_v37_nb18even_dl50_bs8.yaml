@@ -33,7 +33,7 @@
 # buffer + glibc fragmentation from JPEG decode + parallel_calls=16 across
 # 9 RLDS pipelines on rank 0 only (Accelerate dispatch_batches=True). These
 # env vars are the cheapest A/B test for that hypothesis.
-#   cd /misc/dl00/takaki/X-VLA-Adapter
+#   cd /misc/dl00/takaki/GEM-4-VLA
 #   mkdir -p outputs/oxe_pretrain_v37_nb18even_dl50_bs8
 #   MALLOC_ARENA_MAX=2 MALLOC_TRIM_THRESHOLD_=0 \
 #   CUDA_VISIBLE_DEVICES=0,1,2,3 \

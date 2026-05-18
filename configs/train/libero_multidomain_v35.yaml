@@ -35,7 +35,7 @@
 # Launch (single GPU, dl40 NCCL multi-GPU broken since 5/4 apt upgrade):
 #   PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
 #   CUDA_VISIBLE_DEVICES=5 \
-#   PYTHONPATH=/misc/dl00/takaki/X-VLA-Adapter/src:\
+#   PYTHONPATH=/misc/dl00/takaki/GEM-4-VLA/src:\
 #     /misc/dl00/takaki/vla-gemma-4/VLA-Adapter:\
 #     /misc/dl00/takaki/vla-gemma-4 \
 #   /misc/dl00/takaki/vla-gemma-4/.venv-gemma4/bin/python \
@@ -81,10 +81,10 @@ data:
   # eval-time stats_path / unnorm_key reference the combined-LIBERO payload so
   # de-normalization at deployment matches training-time normalization.
   unnorm_key: libero_combined_no_noops
-  stats_path: /misc/dl00/takaki/X-VLA-Adapter/outputs/libero_combined_q99/dataset_statistics.json
+  stats_path: outputs/libero_combined_q99/dataset_statistics.json
   # NEW vs v34: combined Q99 stats applied to every child suite, eliminating
   # per-suite distribution drift across the WeightedMultiDataset mixer.
-  shared_stats_path: /misc/dl00/takaki/X-VLA-Adapter/outputs/libero_combined_q99/dataset_statistics.json
+  shared_stats_path: outputs/libero_combined_q99/dataset_statistics.json
   sources:
     - dataset_name: libero_spatial_no_noops
       domain_id: 0

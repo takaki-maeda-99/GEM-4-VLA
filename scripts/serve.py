@@ -32,7 +32,7 @@ from vla_project.deployment.inference_server import build_app
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description="X-VLA-Adapter inference HTTP server")
+    ap = argparse.ArgumentParser(description="GEM-4-VLA inference HTTP server")
     ap.add_argument("--checkpoint", required=True,
                     help="local ckpt dir, HF id 'org/repo', or 'org/repo/subfolder'")
     ap.add_argument("--predictor", choices=["hold_position", "xvla_adapter"],

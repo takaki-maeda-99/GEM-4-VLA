@@ -27,7 +27,7 @@ def test_param_groups_present_and_no_frozen_group():
 
 def test_default_per_group_lr_coefficients():
     """SigLIP/Gemma 0.1, SoftPrompt 0.1, ActionQuery/Projections/ActionHead 1.0
-    relative to base lr — matches X-VLA-Adapter convention."""
+    relative to base lr — matches GEM-4-VLA convention."""
     cfg = VLAPolicyConfig(num_domains=1, hidden_dim=32, num_blocks=4)
     policy = VLAPolicy(cfg, _StubSig(), _StubGemma())
     base = 1e-4

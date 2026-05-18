@@ -27,7 +27,7 @@
 # Same MALLOC_ARENA_MAX=2 + with_ram_budget(1) host-RAM mitigations as v37.
 #
 # Launch:
-#   cd /misc/dl00/takaki/X-VLA-Adapter
+#   cd /misc/dl00/takaki/GEM-4-VLA
 #   mkdir -p outputs/oxe_pretrain_v38_nb35_dl50_bs8
 #   MALLOC_ARENA_MAX=2 MALLOC_TRIM_THRESHOLD_=0 \
 #   CUDA_VISIBLE_DEVICES=0,1,2,3 \

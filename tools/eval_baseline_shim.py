@@ -9,7 +9,7 @@ arch-mismatch issue (e.g. our `scene_proj` capacity). If it evaluates to
 
 Run via the vla-gemma-4 venv (transformers 5.5.4 required):
 
-    PYTHONPATH=/misc/dl00/takaki/X-VLA-Adapter/src:\\
+    PYTHONPATH=/misc/dl00/takaki/GEM-4-VLA/src:\\
 /misc/dl00/takaki/vla-gemma-4/VLA-Adapter:\\
 /misc/dl00/takaki/vla-gemma-4 \\
     /misc/dl00/takaki/vla-gemma-4/.venv-gemma4/bin/python \\

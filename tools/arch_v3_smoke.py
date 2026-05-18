@@ -3,7 +3,7 @@ import torch
 from omegaconf import OmegaConf
 
 import sys
-sys.path.insert(0, "/misc/dl00/takaki/X-VLA-Adapter/src")
+sys.path.insert(0, "/misc/dl00/takaki/GEM-4-VLA/src")
 
 from vla_project.data.constants import (
     ACTION_DIM, NUM_ACTION_TOKENS, NUM_SOFT_PROMPT_TOKENS, PROPRIO_DIM,
@@ -14,7 +14,7 @@ from vla_project.models.vla_policy import VLAPolicy, VLAPolicyConfig
 
 
 def main():
-    cfg = OmegaConf.load("/misc/dl00/takaki/X-VLA-Adapter/configs/train/oxe_pretrain_v47_arch_v3_libero_dl50_bs8.yaml")
+    cfg = OmegaConf.load("/misc/dl00/takaki/GEM-4-VLA/configs/train/oxe_pretrain_v47_arch_v3_libero_dl50_bs8.yaml")
     md = OmegaConf.to_container(cfg.model, resolve=True)
     lora_cfg = md.pop("lora", None)
 

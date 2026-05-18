@@ -1,4 +1,4 @@
-"""HTTP inference server for X-VLA-Adapter checkpoints.
+"""HTTP inference server for GEM-4-VLA checkpoints.
 
 See docs/superpowers/specs/2026-05-06-vla-inference-server-design.md for the
 full design. This package implements the Phase 0 HoldPosition path; the

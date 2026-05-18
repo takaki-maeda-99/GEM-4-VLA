@@ -12,10 +12,10 @@ Adapted from /misc/dl00/takaki/vla-gemma-4/scripts/stage3/download_data.py.
 Direct GCS copy (anonymous read of gs://gresearch/robotics/<name>/<version>/),
 parallel ThreadPoolExecutor, resume by skipping existing files, status JSON.
 
-Run with the X-VLA-Adapter venv (TF 2.15 + tfds via dlimp transitive):
-  /misc/dl00/takaki/X-VLA-Adapter/.venv/bin/python \
-    /misc/dl00/takaki/X-VLA-Adapter/tools/download_oxe_v37.py 2>&1 \
-    | tee /misc/dl00/takaki/X-VLA-Adapter/outputs/v37_dl/download.log
+Run with the GEM-4-VLA venv (TF 2.15 + tfds via dlimp transitive):
+  /misc/dl00/takaki/GEM-4-VLA/.venv/bin/python \
+    /misc/dl00/takaki/GEM-4-VLA/tools/download_oxe_v37.py 2>&1 \
+    | tee /misc/dl00/takaki/GEM-4-VLA/outputs/v37_dl/download.log
 """
 import argparse
 import json
@@ -32,7 +32,7 @@ tf.config.set_visible_devices([], "GPU")
 
 
 DATA_ROOT = Path("/misc/dl00/takaki/vla-gemma-4/data/stage3_openx")
-LOG_DIR = Path("/misc/dl00/takaki/X-VLA-Adapter/outputs/v37_dl")
+LOG_DIR = Path("/misc/dl00/takaki/GEM-4-VLA/outputs/v37_dl")
 LOG_PATH = LOG_DIR / "download.log"
 STATUS_PATH = LOG_DIR / "download_status.json"
 

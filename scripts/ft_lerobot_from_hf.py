@@ -175,7 +175,7 @@ def _step_launch(args, launch_cfg: Any, cfg_path: Path) -> None:
     log_rel = log_path.relative_to(REPO_ROOT)
     if host:
         remote = (
-            f"cd X-VLA-Adapter && nohup env {env_str} {launch_cmd} "
+            f"cd GEM-4-VLA && nohup env {env_str} {launch_cmd} "
             f"> {log_rel} 2>&1 & echo PID=$!"
         )
         print(f"\n+ ssh {host} '{remote}'")

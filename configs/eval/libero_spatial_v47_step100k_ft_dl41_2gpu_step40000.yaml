@@ -47,7 +47,7 @@ vision:
 language: {model_name: google/gemma-4-E2B}
 data:
   unnorm_key: libero_spatial_no_noops
-  stats_path: /misc/dl00/takaki/X-VLA-Adapter/data/libero_stats/LIBERO-Spatial-Pro/dataset_statistics.json
+  stats_path: data/libero_stats/LIBERO-Spatial-Pro/dataset_statistics.json
 robot:
   bddl_path_root: /misc/dl00/takaki/vla-gemma-4/LIBERO/libero/libero/bddl_files
   task_suite: libero_spatial

@@ -100,7 +100,7 @@ def build_app(
     post_process_path = runtime.post_process_path
     proprio_stats = meta["norm_stats"][resolved_unnorm_key]["proprio"]
 
-    app = FastAPI(title="X-VLA-Adapter Inference Server")
+    app = FastAPI(title="GEM-4-VLA Inference Server")
     state = {
         "predictor_class": type(predictor).__name__,
         "ready_at_ns": time.monotonic_ns(),

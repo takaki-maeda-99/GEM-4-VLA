@@ -11,8 +11,8 @@
 #
 # Launch:
 #   CUDA_VISIBLE_DEVICES=0,1 \
-#   PYTHONPATH=/misc/dl00/takaki/X-VLA-Adapter/src \
-#   /misc/dl00/takaki/X-VLA-Adapter/.venv/bin/accelerate launch \
+#   PYTHONPATH=/misc/dl00/takaki/GEM-4-VLA/src \
+#   /misc/dl00/takaki/GEM-4-VLA/.venv/bin/accelerate launch \
 #     --config_file configs/accelerate/dl40_2gpu.yaml \
 #     scripts/train.py configs/train/libero_spatial_v37_ft.yaml
 seed: 0

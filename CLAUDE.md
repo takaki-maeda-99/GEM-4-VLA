@@ -721,7 +721,7 @@ run = api.run('takaki-maeda-1999-toyota-technological-institute/vla-project/<run
 print(run.state, run.summary.get('_step'), run.summary.get('train/loss'))
 ```
 
-The `<run_id>` is the suffix of the wandb run-dir under `/misc/dl00/takaki/X-VLA-Adapter/wandb/run-<timestamp>-<run_id>/`. The wandb run also exposes `train/eta_s` and `train/progress_pct` for sanity-check on whether the loop is healthy.
+The `<run_id>` is the suffix of the wandb run-dir under `/misc/dl00/takaki/GEM-4-VLA/wandb/run-<timestamp>-<run_id>/`. The wandb run also exposes `train/eta_s` and `train/progress_pct` for sanity-check on whether the loop is healthy.
 
 A run is genuinely stuck only when ALL of:
 
