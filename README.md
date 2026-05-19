@@ -53,9 +53,8 @@ determines which one to install.
 | x86_64 Linux (training / research)  | `bash scripts/setup_x86.sh`     | `envs/x86`      | PyTorch cu128 (driver ≥ 12.6)           |
 | Jetson Orin (JetPack 6 / CUDA 12.6) | `bash scripts/setup_jetson.sh`  | `envs/jetson`   | jetson-ai-lab JP6/cu126 (sm_87, cp310)  |
 
-Each setup script installs uv (if missing), initialises the `VLA-Adapter` and
-`X-VLA` submodules, runs `uv sync --project envs/<env>`, and finishes with a
-torch + Gemma-4 smoke check.
+Each setup script installs uv (if missing), runs `uv sync --project envs/<env>`,
+and finishes with a torch + Gemma-4 smoke check.
 
 After setup, every command must target the chosen env via `--project`:
 
@@ -270,3 +269,18 @@ uv run --project envs/x86 ruff check src/ tests/         # lint
 
 See [`DEVELOPMENT.md`](DEVELOPMENT.md) and [`CLAUDE.md`](CLAUDE.md) for the
 coding rules and contribution flow.
+
+## Acknowledgments
+
+This project builds on design and code from two upstream open-source projects:
+
+- [**VLA-Adapter**](https://github.com/OpenHelix-Team/VLA-Adapter) (MIT) —
+  the `src/prismatic/` subtree is a slimmed-down vendoring; the action-head
+  block layout and per-domain projector convention also originate here.
+- [**X-VLA**](https://github.com/2toinf/X-VLA) (Apache 2.0) — design
+  references for the EE6D 20-dim action layout, the self-attention pool
+  action-head block, the multi-domain DA-Linear projector, and the two-step
+  LLM warmup curriculum.
+
+See [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) for full attribution
+and license texts.

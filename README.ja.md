@@ -51,9 +51,9 @@ libero_10 は `bs=8 × 4 GPU × accum=4 = eff bs 128`。
 | x86_64 Linux (training / research)    | `bash scripts/setup_x86.sh`      | `envs/x86`      | PyTorch cu128 (driver ≥ 12.6)           |
 | Jetson Orin (JetPack 6 / CUDA 12.6)   | `bash scripts/setup_jetson.sh`   | `envs/jetson`   | jetson-ai-lab JP6/cu126 (sm_87, cp310)  |
 
-各 setup スクリプトは、uv のインストール (未導入なら) → `VLA-Adapter` と `X-VLA`
-サブモジュールの init → `uv sync --project envs/<env>` → torch + Gemma-4 の
-smoke check までを実施します。
+各 setup スクリプトは、uv のインストール (未導入なら) →
+`uv sync --project envs/<env>` → torch + Gemma-4 の smoke check までを
+実施します。
 
 セットアップ後は、すべてのコマンドで `--project` を指定して環境を切り替えます。
 
@@ -274,3 +274,17 @@ uv run --project envs/x86 ruff check src/ tests/         # lint
 
 コーディングルールと貢献フローは [`DEVELOPMENT.md`](DEVELOPMENT.md) と
 [`CLAUDE.md`](CLAUDE.md) を参照してください。
+
+## 謝辞
+
+本プロジェクトは以下のオープンソースプロジェクトを参考・利用しています。
+
+- [**VLA-Adapter**](https://github.com/OpenHelix-Team/VLA-Adapter) (MIT) —
+  `src/prismatic/` 配下はこのリポジトリを slim down して vendoring したものです。
+  action head のブロック構造、ドメイン別 projector の慣例もここを起点としています。
+- [**X-VLA**](https://github.com/2toinf/X-VLA) (Apache 2.0) — EE6D 20-dim
+  action layout、self-attention pool の action-head ブロック、マルチドメイン
+  DA-Linear projector、2-step LLM warmup curriculum などの設計を参考にしています。
+
+完全な帰属表記とライセンス本文は [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)
+を参照してください。
