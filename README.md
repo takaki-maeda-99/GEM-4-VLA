@@ -80,45 +80,103 @@ Pre-requisites the scripts do **not** handle (host-specific):
   pulls torch / torchvision from the jetson-ai-lab JP6 / cu126 index instead.
 - Both envs are pinned to Python 3.10 (jetson-ai-lab only publishes cp310).
 
-## Reproducing the results
+## Reproducing the LIBERO results
 
-This repo assumes you start from `GEM-4-Pretrained-OXE` on Hugging Face.
-Pretraining from scratch (OXE 9 + LIBERO 4 mix, ~100k steps) is supported but
-not documented here — talk to the maintainer if you need that path.
+The fastest path to the numbers in the Results table is to download the
+published FT checkpoints from Hugging Face and run eval directly — **no GPU
+training needed.** If you want to retrain from the pretrain base, jump to
+**[Fine-tuning from the pretrain base](#fine-tuning-from-the-pretrain-base-optional)**
+below.
 
-### 1. Download the pretrain base
+### Prerequisites
+
+- `envs/x86` set up (see [Setup](#setup) above).
+- **LIBERO simulator + assets**: clone `<https://github.com/Lifelong-Robot-Learning/LIBERO>`
+  somewhere local and export the path. Headless render uses `MUJOCO_GL=osmesa`.
+  ```bash
+  export LIBERO_PATH=/path/to/your/LIBERO
+  ```
+  The eval configs already reference `${LIBERO_PATH}/libero/libero/bddl_files`
+  and `${LIBERO_PATH}` for task metadata + assets.
+- Hugging Face token logged in (the FT ckpt repos are public, but the Gemma-4
+  tokenizer fetched at init time is gated):
+  ```bash
+  uv run --project envs/x86 huggingface-cli login
+  ```
+
+### A. Evaluate a published FT checkpoint (recommended)
+
+For each LIBERO suite, download the FT ckpt into the local path the
+matching eval config expects, then launch `scripts/eval.py`.
+
+| Suite     | HF checkpoint                                                                                | Local ckpt path                                                                | Eval config                                                                                |
+|-----------|----------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------|
+| spatial   | [`takaki99/GEM-4-FT-libero-spatial`](https://huggingface.co/takaki99/GEM-4-FT-libero-spatial) | `outputs/libero_spatial_v47_step100k_ft_dl41_2gpu/checkpoints/step_50000`     | `configs/eval/libero_spatial_v47_step100k_ft_dl41_2gpu_step50000_10ep.yaml`                |
+| object    | [`takaki99/GEM-4-FT-libero-object`](https://huggingface.co/takaki99/GEM-4-FT-libero-object)   | `outputs/libero_object_v47_step100k_ft_dl41_2gpu/checkpoints/step_50000`      | `configs/eval/libero_object_v47_step100k_ft_dl41_2gpu_step50000_10ep.yaml`                 |
+| goal      | [`takaki99/GEM-4-FT-libero-goal`](https://huggingface.co/takaki99/GEM-4-FT-libero-goal)       | `outputs/libero_goal_v47_step100k_ft_dl41_2gpu/checkpoints/step_50000`        | `configs/eval/libero_goal_v47_step100k_ft_dl41_2gpu_step50000_10ep.yaml`                   |
+| 10 (long) | [`takaki99/GEM-4-FT-libero-10`](https://huggingface.co/takaki99/GEM-4-FT-libero-10)           | `outputs/libero_10_v47_step95k_ft_4gpu_accum4/checkpoints/step_50000`         | `configs/eval/libero_10_v47_step95k_ft_4gpu_accum4_step50000_10ep.yaml`                    |
+
+Example — reproducing LIBERO-Spatial (72 %):
 
 ```bash
+# 1. Download the ckpt to the path the eval config expects (zero-edit reproduction).
+mkdir -p outputs/libero_spatial_v47_step100k_ft_dl41_2gpu/checkpoints
+uv run --project envs/x86 huggingface-cli download \
+  takaki99/GEM-4-FT-libero-spatial \
+  --local-dir outputs/libero_spatial_v47_step100k_ft_dl41_2gpu/checkpoints/step_50000
+
+# 2. Run eval (100 ep / suite, ~30–60 min on a single GPU).
+LIBERO_PATH=/path/to/your/LIBERO \
+MUJOCO_GL=osmesa \
+CUDA_VISIBLE_DEVICES=0 \
+  uv run --project envs/x86 python scripts/eval.py \
+    configs/eval/libero_spatial_v47_step100k_ft_dl41_2gpu_step50000_10ep.yaml
+```
+
+Swap `spatial → object / goal / 10` (and the libero_10 path uses the
+different run name, see table) to evaluate the other suites.
+
+Outputs:
+
+- `outputs/<run>/eval_step50000_10ep.log` — single-line metrics summary:
+  `[eval] metrics={'success_rate': 0.72, ...}`
+- `outputs/<run>/eval_videos_step50000_10ep/` — per-episode MP4s
+  (100 videos / suite)
+
+The number of episodes per task is controlled by `eval.num_episodes_per_task`
+in the eval yaml. The configs above use **10 ep / task = 100 ep / suite**,
+which matches the Results table. A 5 ep mode also exists for fast sweeps but
+drifts by ±10 pt on variance-prone tasks (spatial task_5, libero_10 task_8).
+
+### B. Fine-tuning from the pretrain base (optional)
+
+If you want to retrain the FT yourself instead of using the published ckpts:
+
+```bash
+# 1. Download the pretrain base into the path FT configs' resume_ckpt expects.
 mkdir -p outputs/oxe_pretrain_v47_arch_v3_libero_dl50_bs8/checkpoints
 uv run --project envs/x86 huggingface-cli download \
   takaki99/GEM-4-Pretrained-OXE \
   --local-dir outputs/oxe_pretrain_v47_arch_v3_libero_dl50_bs8/checkpoints/step_100000
-```
 
-(The output dir name is what existing FT configs' `resume_ckpt:` already
-points at — keep it as-is for zero-edit reproduction.)
-
-### 2. LIBERO suite FT
-
-Each suite has its own FT config:
-
-```bash
-# Pick one of: libero_spatial / libero_object / libero_goal / libero_10
-CONFIG=configs/train/libero_spatial_v47_step100k_ft_dl41_2gpu.yaml
-
+# 2. Launch FT for the suite of your choice.
+#    Suites: libero_spatial / libero_object / libero_goal (2 GPU, eff bs 32)
 CUDA_VISIBLE_DEVICES=0,1 \
   uv run --project envs/x86 accelerate launch \
     --config_file configs/accelerate/dl50_4gpu.yaml \
     --main_process_port 29501 \
-    scripts/train.py $CONFIG
+    scripts/train.py \
+    configs/train/libero_spatial_v47_step100k_ft_dl41_2gpu.yaml
 ```
 
 libero_10 uses `configs/train/libero_10_v47_step95k_ft_4gpu_accum4.yaml`
-(effective batch 128 across 4 GPUs).
+(4 GPU, effective batch 128). Checkpoints land under
+`outputs/<wandb.name>/checkpoints/step_<N>/`.
 
-Checkpoints land under `outputs/<wandb.name>/checkpoints/step_<N>/`.
+Pretraining from scratch (OXE 9 + LIBERO 4 mix, ~100 k steps) is supported in
+code but not documented here — talk to the maintainer if you need that path.
 
-### 3. ReBotArm hand-teach FT (HF dataset → FT pipeline)
+## Fine-tuning on a new LeRobot dataset (HF → FT)
 
 End-to-end, fully yaml-driven launcher
 [`scripts/ft_lerobot_from_hf.py`](scripts/ft_lerobot_from_hf.py): HF download
@@ -167,27 +225,6 @@ launch:
 All hyperparameters (lr, freeze, batch, etc.) live in the yaml; CLI flags are
 operational only (`--dry_run`, `--no_launch`, `--force_convert / _stats /
 _extract / _local`).
-
-## Evaluation
-
-```bash
-uv run --project envs/x86 python scripts/eval.py configs/eval/<your_eval>.yaml
-```
-
-Episode count is set in the eval yaml (`eval.num_episodes_per_task`).
-Conventions used for the numbers above:
-
-- **5 ep / task** — fast sweep across many step checkpoints during a long FT
-  to spot promising ckpt ranges.
-- **10 ep / task** — pin definitive numbers; published / HF-card numbers
-  always come from this mode. 5ep values drift by ±10 pt on the
-  variance-prone tasks (spatial task_5, libero_10 task_8, etc.).
-
-Outputs:
-
-- `outputs/<run>/eval_step<K>[<suffix>].log` — metrics printed inline as
-  `[eval] metrics={...}`
-- `outputs/<run>/eval_videos_step<K>[<suffix>]/` — per-episode MP4s
 
 ## Inference server
 
