@@ -1,4 +1,6 @@
-# V47 step_95000 -> LIBERO 10 FT, 4 GPU DDP + gradient_accumulation=4.
+# V47 step_100000 -> LIBERO 10 FT, 4 GPU DDP + gradient_accumulation=4.
+# (filename retains "step95k" for run-output dir continuity with the published
+# eval configs; the actual resume base is step_100000.)
 # Effective batch = 8 (per-rank) × 4 (DDP) × 4 (accum) = 128.
 # Pair config: configs/train/libero_10_v47_step95k_ft_1gpu_noaccum.yaml
 # Hardware: dl50 GPU 0-3.
@@ -72,7 +74,7 @@ train:
   min_lr_ratio: 1.0
   grad_clip_norm: 1.0
   ddp_find_unused_parameters: false
-  resume_ckpt: outputs/oxe_pretrain_v47_arch_v3_libero_dl50_bs8/checkpoints/step_95000
+  resume_ckpt: outputs/oxe_pretrain_v47_arch_v3_libero_dl50_bs8/checkpoints/step_100000
   lr_coefs:
     gemma_lora:        0.1
     siglip:            0.0

@@ -161,7 +161,18 @@ uv run --project envs/x86 hf download \
   takaki99/GEM-4-Pretrained-OXE \
   --local-dir outputs/oxe_pretrain_v47_arch_v3_libero_dl50_bs8/checkpoints/step_100000
 
-# 2. FT を起動。
+# 2. LIBERO の modified RLDS データ (OpenVLA 公開、4 スイーツ合計 ~25 GB) を
+#    取得し、FT config の data.data_dir が見えるパスに置く。
+uv run --project envs/x86 hf download \
+  openvla/modified_libero_rlds \
+  --repo-type dataset \
+  --local-dir /path/to/modified_libero_rlds
+#    config が見ているパスへ symlink:
+ln -s /path/to/modified_libero_rlds \
+  /misc/dl00/takaki/vla-gemma-4/data/modified_libero_rlds
+#    または各 FT yaml の data.data_dir を自分のパスに書き換え。
+
+# 3. FT を起動。
 #    spatial / object / goal は 2 GPU で eff bs 32。
 CUDA_VISIBLE_DEVICES=0,1 \
   uv run --project envs/x86 accelerate launch \

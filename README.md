@@ -161,7 +161,18 @@ uv run --project envs/x86 hf download \
   takaki99/GEM-4-Pretrained-OXE \
   --local-dir outputs/oxe_pretrain_v47_arch_v3_libero_dl50_bs8/checkpoints/step_100000
 
-# 2. Launch FT for the suite of your choice.
+# 2. Download the modified LIBERO RLDS data (OpenVLA's public conversion,
+#    ~25 GB across 4 suites). Then point the FT configs' data.data_dir at it.
+uv run --project envs/x86 hf download \
+  openvla/modified_libero_rlds \
+  --repo-type dataset \
+  --local-dir /path/to/modified_libero_rlds
+#    Either symlink the path the configs expect:
+ln -s /path/to/modified_libero_rlds \
+  /misc/dl00/takaki/vla-gemma-4/data/modified_libero_rlds
+#    ...or edit `data.data_dir` in each FT yaml to your local path.
+
+# 3. Launch FT for the suite of your choice.
 #    Suites: libero_spatial / libero_object / libero_goal (2 GPU, eff bs 32)
 CUDA_VISIBLE_DEVICES=0,1 \
   uv run --project envs/x86 accelerate launch \
