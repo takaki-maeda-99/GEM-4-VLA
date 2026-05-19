@@ -65,10 +65,12 @@ uv run --project envs/jetson python scripts/serve.py ...
 スクリプトが **処理しない** ホスト固有の前提:
 
 - 兄弟ディレクトリの `vla-gemma-4/` チェックアウト (RLDS データとベースライン ckpt 用、
-  OXE 事前学習を再現する場合のみ必要)
+  LIBERO suite の FT および OXE 事前学習で必要 — FT config の
+  `data.data_dir` がこのチェックアウト配下を指しています。下の A.
+  eval-from-HF フローでは不要)
 - LIBERO シミュレータ + assets (`MUJOCO_GL=osmesa` で headless レンダリング)
 - Gemma-4 / SigLIP 用の Hugging Face トークン
-  (`uv run --project envs/<env> huggingface-cli login`)
+  (`uv run --project envs/<env> hf auth login`)
 
 ### なぜ環境を2つに分けているか
 
@@ -80,46 +82,105 @@ uv run --project envs/jetson python scripts/serve.py ...
   jetson-ai-lab の JP6 / cu126 index から torch / torchvision を取得します。
 - 両環境とも Python 3.10 固定です (jetson-ai-lab が cp310 のみ公開しているため)。
 
-## 結果の再現手順
+## LIBERO 結果の再現手順
 
-このリポジトリは **`GEM-4-Pretrained-OXE` を Hugging Face から起点に使う前提** で
-書かれています。スクラッチからの事前学習 (OXE 9 + LIBERO 4 mix、~100k step) も
-コード上はサポートしていますが、本 README には載せていません。必要であれば
-メンテナに相談してください。
+最短ルートは、Hugging Face で公開している FT checkpoint をダウンロードして
+そのまま eval を回すこと。**学習用 GPU は不要** です。FT を自前で回し直したい
+場合は [事前学習ベースから FT する](#事前学習ベースから-ft-する-オプション) を
+参照してください。
 
-### 1. 事前学習ベースをダウンロード
+### 前提
+
+- `envs/x86` のセットアップが済んでいること ([セットアップ](#セットアップ) を参照)。
+- **LIBERO シミュレータ + assets**: `<https://github.com/Lifelong-Robot-Learning/LIBERO>`
+  をローカルにクローンして `LIBERO_PATH` を export しておく。headless render は
+  `MUJOCO_GL=osmesa` を使います。
+  ```bash
+  export LIBERO_PATH=/path/to/your/LIBERO
+  ```
+  eval config 側で `${LIBERO_PATH}/libero/libero/bddl_files` と `${LIBERO_PATH}`
+  を参照する形になっています。
+- Hugging Face のトークンログイン (FT ckpt 自体は public ですが、初期化時に
+  fetch する Gemma-4 tokenizer が gated):
+  ```bash
+  uv run --project envs/x86 hf auth login
+  ```
+
+### A. 公開済み FT checkpoint で評価する (推奨)
+
+各 LIBERO suite について、eval config が参照しているローカルパスに
+HF から ckpt をダウンロードし、`scripts/eval.py` を起動します。
+
+| Suite     | HF checkpoint                                                                                | ローカル ckpt パス                                                              | Eval config                                                                                |
+|-----------|----------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------|
+| spatial   | [`takaki99/GEM-4-FT-libero-spatial`](https://huggingface.co/takaki99/GEM-4-FT-libero-spatial) | `outputs/libero_spatial_v47_step100k_ft_dl41_2gpu/checkpoints/step_50000`     | `configs/eval/libero_spatial_v47_step100k_ft_dl41_2gpu_step50000_10ep.yaml`                |
+| object    | [`takaki99/GEM-4-FT-libero-object`](https://huggingface.co/takaki99/GEM-4-FT-libero-object)   | `outputs/libero_object_v47_step100k_ft_dl41_2gpu/checkpoints/step_50000`      | `configs/eval/libero_object_v47_step100k_ft_dl41_2gpu_step50000_10ep.yaml`                 |
+| goal      | [`takaki99/GEM-4-FT-libero-goal`](https://huggingface.co/takaki99/GEM-4-FT-libero-goal)       | `outputs/libero_goal_v47_step100k_ft_dl41_2gpu/checkpoints/step_50000`        | `configs/eval/libero_goal_v47_step100k_ft_dl41_2gpu_step50000_10ep.yaml`                   |
+| 10 (long) | [`takaki99/GEM-4-FT-libero-10`](https://huggingface.co/takaki99/GEM-4-FT-libero-10)           | `outputs/libero_10_v47_step95k_ft_4gpu_accum4/checkpoints/step_50000`         | `configs/eval/libero_10_v47_step95k_ft_4gpu_accum4_step50000_10ep.yaml`                    |
+
+例 — LIBERO-Spatial の 72 % を再現:
 
 ```bash
+# 1. eval config が参照しているパスに ckpt をダウンロード (config 編集不要)
+mkdir -p outputs/libero_spatial_v47_step100k_ft_dl41_2gpu/checkpoints
+uv run --project envs/x86 hf download \
+  takaki99/GEM-4-FT-libero-spatial \
+  --local-dir outputs/libero_spatial_v47_step100k_ft_dl41_2gpu/checkpoints/step_50000
+
+# 2. 評価実行 (100 ep / suite、GPU 1枚で 30〜60 分)
+LIBERO_PATH=/path/to/your/LIBERO \
+MUJOCO_GL=osmesa \
+CUDA_VISIBLE_DEVICES=0 \
+  uv run --project envs/x86 python scripts/eval.py \
+    configs/eval/libero_spatial_v47_step100k_ft_dl41_2gpu_step50000_10ep.yaml
+```
+
+`spatial → object / goal / 10` に差し替えて他の suite も同様に評価できます
+(libero_10 だけは表のとおり run 名が違うので注意)。
+
+出力先:
+
+- `outputs/<run>/eval_step50000_10ep.log` — メトリクスサマリ:
+  `[eval] metrics={'success_rate': 0.72, ...}` の1行
+- `outputs/<run>/eval_videos_step50000_10ep/` — エピソード単位の MP4
+  (1 suite あたり 100 本)
+
+`eval.num_episodes_per_task` で1タスクあたりのエピソード数を指定します。
+上の config は **10 ep / task = 100 ep / suite**、Results テーブルの数値と
+同じ条件です。FT 中の高速 sweep 用に 5 ep モードもありますが、variance の
+大きいタスク (spatial task_5、libero_10 task_8 など) では ±10 pt ぶれます。
+
+### B. 事前学習ベースから FT する (オプション)
+
+公開済み ckpt をそのまま使うのでなく自前で FT を回し直したい場合:
+
+```bash
+# 1. FT config の resume_ckpt が見ているパスに事前学習ベースをダウンロード。
 mkdir -p outputs/oxe_pretrain_v47_arch_v3_libero_dl50_bs8/checkpoints
-uv run --project envs/x86 huggingface-cli download \
+uv run --project envs/x86 hf download \
   takaki99/GEM-4-Pretrained-OXE \
   --local-dir outputs/oxe_pretrain_v47_arch_v3_libero_dl50_bs8/checkpoints/step_100000
-```
 
-(出力ディレクトリ名は、既存 FT config の `resume_ckpt:` がそのまま参照している
-パスに合わせています。ゼロ編集で再現するため、このまま使ってください。)
-
-### 2. LIBERO suite FT
-
-各 suite に対応する FT config が用意されています。
-
-```bash
-# libero_spatial / libero_object / libero_goal / libero_10 から選択
-CONFIG=configs/train/libero_spatial_v47_step100k_ft_dl41_2gpu.yaml
-
+# 2. FT を起動。
+#    spatial / object / goal は 2 GPU で eff bs 32。
 CUDA_VISIBLE_DEVICES=0,1 \
   uv run --project envs/x86 accelerate launch \
-    --config_file configs/accelerate/dl50_4gpu.yaml \
+    --config_file configs/accelerate/dl50_2gpu.yaml \
     --main_process_port 29501 \
-    scripts/train.py $CONFIG
+    scripts/train.py \
+    configs/train/libero_spatial_v47_step100k_ft_dl41_2gpu.yaml
 ```
 
-libero_10 は `configs/train/libero_10_v47_step95k_ft_4gpu_accum4.yaml` を
-使います (4 GPU で effective batch 128)。
-
+libero_10 は `configs/train/libero_10_v47_step95k_ft_4gpu_accum4.yaml`
+(4 GPU、effective batch 128) を使います。こちらは GPU を 4 枚見せて
+`configs/accelerate/dl50_4gpu.yaml` を渡してください。
 checkpoint は `outputs/<wandb.name>/checkpoints/step_<N>/` に保存されます。
 
-### 3. ReBotArm hand-teach FT (HF dataset → FT パイプライン)
+スクラッチからの事前学習 (OXE 9 + LIBERO 4 mix、~100k step) もコード上は
+サポートしていますが、本 README には載せていません。必要ならメンテナに
+相談してください。
+
+## 新しい LeRobot dataset で FT する (HF → FT)
 
 end-to-end の yaml-driven ランチャー
 [`scripts/ft_lerobot_from_hf.py`](scripts/ft_lerobot_from_hf.py): HF ダウンロード
@@ -168,27 +229,6 @@ launch:
 ハイパラ (lr、freeze、batch など) はすべて yaml 側に書きます。CLI フラグは
 動作モード制御のみ (`--dry_run`、`--no_launch`、`--force_convert / _stats /
 _extract / _local`)。
-
-## 評価
-
-```bash
-uv run --project envs/x86 python scripts/eval.py configs/eval/<your_eval>.yaml
-```
-
-エピソード数は eval yaml の `eval.num_episodes_per_task` で指定します。
-上の結果テーブルで使った数値の前提:
-
-- **5 ep / task** — FT 中に多数の step checkpoint をざっと sweep して、
-  有望な ckpt 帯を見つけるための高速確認。
-- **10 ep / task** — 確定値の確認。公開する数値、HF カードに載せる数値は
-  必ずこのモードで取ります。5ep の値は variance の大きいタスク
-  (spatial task_5、libero_10 task_8 など) で ±10 pt 程度ぶれます。
-
-出力先:
-
-- `outputs/<run>/eval_step<K>[<suffix>].log` — `[eval] metrics={...}` 形式の
-  メトリクスがインラインで出力されます。
-- `outputs/<run>/eval_videos_step<K>[<suffix>]/` — エピソード単位の MP4。
 
 ## 推論サーバ
 

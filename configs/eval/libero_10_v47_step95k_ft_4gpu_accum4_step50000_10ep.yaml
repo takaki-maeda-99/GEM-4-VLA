@@ -47,9 +47,9 @@ vision:
 language: {model_name: google/gemma-4-E2B}
 data:
   unnorm_key: libero_10_no_noops
-  stats_path: data/libero_stats/LIBERO-10-Pro/dataset_statistics.json
+  stats_path: data/norm_stats/libero_10.json
 robot:
-  bddl_path_root: /misc/dl00/takaki/vla-gemma-4/LIBERO/libero/libero/bddl_files
+  bddl_path_root: ${oc.env:LIBERO_PATH,/misc/dl00/takaki/vla-gemma-4/LIBERO}/libero/libero/bddl_files
   task_suite: libero_10
   image_size: 256
   libero_path: ${oc.env:LIBERO_PATH,/misc/dl00/takaki/vla-gemma-4/LIBERO}
