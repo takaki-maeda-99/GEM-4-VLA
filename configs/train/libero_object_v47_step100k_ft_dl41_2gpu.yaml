@@ -69,7 +69,7 @@ data:
   domain_id: 11
   seed: 42
   unnorm_key: libero_object_no_noops
-  stats_path: data/libero_stats/LIBERO-Object-Pro/dataset_statistics.json
+  stats_path: data/norm_stats/libero_object.json
 train:
   batch_size: 8
   gradient_accumulation_steps: 2

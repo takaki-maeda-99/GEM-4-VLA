@@ -65,7 +65,9 @@ uv run --project envs/jetson python scripts/serve.py ...
 スクリプトが **処理しない** ホスト固有の前提:
 
 - 兄弟ディレクトリの `vla-gemma-4/` チェックアウト (RLDS データとベースライン ckpt 用、
-  OXE 事前学習を再現する場合のみ必要)
+  LIBERO suite の FT および OXE 事前学習で必要 — FT config の
+  `data.data_dir` がこのチェックアウト配下を指しています。下の A.
+  eval-from-HF フローでは不要)
 - LIBERO シミュレータ + assets (`MUJOCO_GL=osmesa` で headless レンダリング)
 - Gemma-4 / SigLIP 用の Hugging Face トークン
   (`uv run --project envs/<env> hf auth login`)
@@ -163,14 +165,15 @@ uv run --project envs/x86 hf download \
 #    spatial / object / goal は 2 GPU で eff bs 32。
 CUDA_VISIBLE_DEVICES=0,1 \
   uv run --project envs/x86 accelerate launch \
-    --config_file configs/accelerate/dl50_4gpu.yaml \
+    --config_file configs/accelerate/dl50_2gpu.yaml \
     --main_process_port 29501 \
     scripts/train.py \
     configs/train/libero_spatial_v47_step100k_ft_dl41_2gpu.yaml
 ```
 
 libero_10 は `configs/train/libero_10_v47_step95k_ft_4gpu_accum4.yaml`
-(4 GPU、effective batch 128) を使います。
+(4 GPU、effective batch 128) を使います。こちらは GPU を 4 枚見せて
+`configs/accelerate/dl50_4gpu.yaml` を渡してください。
 checkpoint は `outputs/<wandb.name>/checkpoints/step_<N>/` に保存されます。
 
 スクラッチからの事前学習 (OXE 9 + LIBERO 4 mix、~100k step) もコード上は

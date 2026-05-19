@@ -66,7 +66,9 @@ uv run --project envs/jetson python scripts/serve.py ...
 Pre-requisites the scripts do **not** handle (host-specific):
 
 - a sibling `vla-gemma-4/` checkout providing RLDS data + baseline checkpoints
-  (only needed for OXE pretrain reproduction)
+  (required for LIBERO suite FT and OXE pretrain reproduction — the FT
+  configs set `data.data_dir` to a path under this checkout. The
+  eval-from-HF flow in section A below does NOT need it.)
 - LIBERO simulator + assets (uses `MUJOCO_GL=osmesa` for headless render)
 - Hugging Face token (`uv run --project envs/<env> hf auth login`) for
   Gemma-4 / SigLIP
@@ -163,14 +165,15 @@ uv run --project envs/x86 hf download \
 #    Suites: libero_spatial / libero_object / libero_goal (2 GPU, eff bs 32)
 CUDA_VISIBLE_DEVICES=0,1 \
   uv run --project envs/x86 accelerate launch \
-    --config_file configs/accelerate/dl50_4gpu.yaml \
+    --config_file configs/accelerate/dl50_2gpu.yaml \
     --main_process_port 29501 \
     scripts/train.py \
     configs/train/libero_spatial_v47_step100k_ft_dl41_2gpu.yaml
 ```
 
 libero_10 uses `configs/train/libero_10_v47_step95k_ft_4gpu_accum4.yaml`
-(4 GPU, effective batch 128). Checkpoints land under
+(4 GPU, effective batch 128) — for that one, expose 4 GPUs and pass
+`configs/accelerate/dl50_4gpu.yaml`. Checkpoints land under
 `outputs/<wandb.name>/checkpoints/step_<N>/`.
 
 Pretraining from scratch (OXE 9 + LIBERO 4 mix, ~100 k steps) is supported in
