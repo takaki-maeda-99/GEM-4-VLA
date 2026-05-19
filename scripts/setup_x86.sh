@@ -20,11 +20,7 @@ if ! command -v uv >/dev/null 2>&1; then
 fi
 echo ">> uv: $(uv --version)"
 
-# 2. Submodules (VLA-Adapter, X-VLA — used as code references / vendored utils)
-echo ">> git submodule update --init --recursive"
-git submodule update --init --recursive
-
-# 3. Python deps (resolved from envs/x86/pyproject.toml + envs/x86/uv.lock)
+# 2. Python deps (resolved from envs/x86/pyproject.toml + envs/x86/uv.lock)
 #    - torch/torchvision pinned to cu128 wheels (driver >= 12.6).
 #    - transformers>=5.5 override bypasses lerobot's <5.0 cap; required for
 #      Gemma4 model_type registration.

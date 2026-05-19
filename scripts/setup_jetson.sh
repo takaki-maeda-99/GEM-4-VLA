@@ -22,11 +22,7 @@ if ! command -v uv >/dev/null 2>&1; then
 fi
 echo ">> uv: $(uv --version)"
 
-# 2. Submodules (VLA-Adapter, X-VLA — used as code references / vendored utils)
-echo ">> git submodule update --init --recursive"
-git submodule update --init --recursive
-
-# 3. Python deps (resolved from envs/jetson/pyproject.toml + envs/jetson/uv.lock)
+# 2. Python deps (resolved from envs/jetson/pyproject.toml + envs/jetson/uv.lock)
 #    - torch/torchvision pinned to jetson-ai-lab wheels (sm_87 baked in).
 #      Upstream cu126/cu128/cu130 wheels are sm_90+ and crash with
 #      "no kernel image" at .to(cuda) on Orin.
