@@ -68,7 +68,7 @@ Pre-requisites the scripts do **not** handle (host-specific):
 - a sibling `vla-gemma-4/` checkout providing RLDS data + baseline checkpoints
   (only needed for OXE pretrain reproduction)
 - LIBERO simulator + assets (uses `MUJOCO_GL=osmesa` for headless render)
-- Hugging Face token (`uv run --project envs/<env> huggingface-cli login`) for
+- Hugging Face token (`uv run --project envs/<env> hf auth login`) for
   Gemma-4 / SigLIP
 
 ### Why two envs?
@@ -101,7 +101,7 @@ below.
 - Hugging Face token logged in (the FT ckpt repos are public, but the Gemma-4
   tokenizer fetched at init time is gated):
   ```bash
-  uv run --project envs/x86 huggingface-cli login
+  uv run --project envs/x86 hf auth login
   ```
 
 ### A. Evaluate a published FT checkpoint (recommended)
@@ -121,7 +121,7 @@ Example — reproducing LIBERO-Spatial (72 %):
 ```bash
 # 1. Download the ckpt to the path the eval config expects (zero-edit reproduction).
 mkdir -p outputs/libero_spatial_v47_step100k_ft_dl41_2gpu/checkpoints
-uv run --project envs/x86 huggingface-cli download \
+uv run --project envs/x86 hf download \
   takaki99/GEM-4-FT-libero-spatial \
   --local-dir outputs/libero_spatial_v47_step100k_ft_dl41_2gpu/checkpoints/step_50000
 
@@ -155,7 +155,7 @@ If you want to retrain the FT yourself instead of using the published ckpts:
 ```bash
 # 1. Download the pretrain base into the path FT configs' resume_ckpt expects.
 mkdir -p outputs/oxe_pretrain_v47_arch_v3_libero_dl50_bs8/checkpoints
-uv run --project envs/x86 huggingface-cli download \
+uv run --project envs/x86 hf download \
   takaki99/GEM-4-Pretrained-OXE \
   --local-dir outputs/oxe_pretrain_v47_arch_v3_libero_dl50_bs8/checkpoints/step_100000
 
